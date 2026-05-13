@@ -59,12 +59,12 @@
 - Menu rows include colored status icons beside each limit
 - Linux GTK menus use real colored text via Pango markup
 - GTK frontend switches to warning/error-style system icons when usage gets low
-- Login/startup installer scripts for Linux, macOS, and Windows
+- Unified `install.py` plus small OS wrapper scripts for Linux, macOS, and Windows
 - No token logging and no extra analytics
 - Pinned dependency files: `requirements.txt` and `pyproject.toml`
 - Provider response shape validation before rendering usage
 - Retry/backoff around transient network failures and 429/5xx responses
-- Unit tests for formatting, validation, and retry behavior
+- Unit tests for formatting, validation, retry behavior, and installer helpers
 
 ## Install in 30 seconds
 
@@ -75,26 +75,53 @@ git clone https://github.com/nimaansari/CLI-Usage.git
 cd CLI-Usage
 ```
 
-### Linux
+### Recommended: unified installer
 
-For GNOME/AppIndicator integration:
+The easiest path is the new cross-platform installer:
+
+```bash
+python3 install.py
+```
+
+It will:
+
+- check Python version
+- choose the best frontend for your OS
+- create a local `.venv` and install pinned Python dependencies when needed
+- create a per-user startup/login entry
+- launch the tray app
+
+Useful installer flags:
+
+```bash
+python3 install.py --frontend xplat      # force pystray frontend
+python3 install.py --frontend gtk        # force Linux GTK/AppIndicator frontend
+python3 install.py --no-autostart        # install/run without login startup
+python3 install.py --no-launch           # install only, do not launch now
+python3 install.py --skip-deps           # do not install Python packages
+python3 install.py --venv .venv-cli-usage # choose a custom virtualenv path
+python3 install.py --dry-run             # preview actions without changing files
+```
+
+### Linux
 
 ```bash
 chmod +x setup.sh
 ./setup.sh
 ```
 
-Or run manually:
+`setup.sh` now delegates to `install.py --frontend auto --install-system-deps`. The cross-platform frontend uses a local `.venv`, avoiding messy system/user Python installs.
+If you do not want `sudo apt-get` system package installation, use:
 
 ```bash
-python3 cli_usage_gtk.py
+python3 install.py --frontend xplat
 ```
 
-For the cross-platform pystray frontend:
+Manual run:
 
 ```bash
-python3 -m pip install --user -r requirements.txt
-python3 cli_usage_xplat.py
+python3 cli_usage_gtk.py      # Linux GTK frontend
+python3 cli_usage_xplat.py    # cross-platform frontend
 ```
 
 ### macOS
@@ -138,8 +165,18 @@ python .\cli_usage_xplat.py
 
 ### macOS / Windows / generic Linux frontend
 
+The installer creates a local virtual environment automatically:
+
 ```bash
-python3 -m pip install --user -r requirements.txt
+python3 install.py --frontend xplat
+```
+
+Manual install if you prefer managing your own environment:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python cli_usage_xplat.py
 ```
 
 ### Linux GTK/AppIndicator frontend
@@ -180,6 +217,7 @@ Still, treat this like any local tool that can read CLI auth files: review the c
 ```bash
 rm -f ~/.config/autostart/cli-usage.desktop
 pkill -f cli_usage_gtk.py || true
+pkill -f cli_usage_xplat.py || true
 ```
 
 ### macOS
@@ -200,10 +238,10 @@ Then quit the tray app from the menu or stop the Python process.
 
 ## Tests
 
-Run the built-in unit tests:
+Run the built-in unit tests and installer helper checks:
 
 ```bash
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests -v
 ```
 
 ## Troubleshooting
@@ -242,6 +280,7 @@ This is expected. The app currently detects Gemini auth status, but does not sho
 - [x] Provider response schema validation
 - [x] Retry/backoff around network calls
 - [x] Linux GTK colored text labels
+- [x] Cleaner unified installer with dry-run/no-launch/no-autostart modes
 - [ ] Native desktop notifications when usage is low
 - [ ] Configurable refresh interval
 - [ ] Package as a macOS app / Windows executable
@@ -253,6 +292,7 @@ This is expected. The app currently detects Gemini auth status, but does not sho
 ```text
 assets/logo.svg        # README hero logo
 assets/screenshot.svg  # README preview mockup
+install.py              # unified installer; creates .venv for xplat frontend
 cli_usage_core.py      # shared usage/auth detection
 requirements.txt       # pinned runtime deps
 pyproject.toml         # project metadata
