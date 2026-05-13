@@ -13,13 +13,13 @@
   <text x="154" y="238" fill="#22C55E" font-family="SFMono-Regular, Consolas, monospace" font-size="24">●</text>
   <text x="194" y="238" fill="#F8FAFC" font-family="SFMono-Regular, Consolas, monospace" font-size="24" font-weight="700">Claude Code</text>
   <text x="194" y="280" fill="#94A3B8" font-family="SFMono-Regular, Consolas, monospace" font-size="20">Account     user@example.com (Max)</text>
-  <text x="194" y="318" fill="#CBD5E1" font-family="SFMono-Regular, Consolas, monospace" font-size="20">5h limit    [████████░░░░] 70% left  resets 14:00</text>
-  <text x="194" y="356" fill="#CBD5E1" font-family="SFMono-Regular, Consolas, monospace" font-size="20">Weekly      [██████░░░░░░] 52% left  resets Fri</text>
+  <text x="194" y="318" fill="#CBD5E1" font-family="SFMono-Regular, Consolas, monospace" font-size="20">🟢 5h limit    [████████░░░░] 70% left  resets 14:00</text>
+  <text x="194" y="356" fill="#CBD5E1" font-family="SFMono-Regular, Consolas, monospace" font-size="20">🟢 Weekly      [██████░░░░░░] 52% left  resets Fri</text>
 
   <text x="154" y="426" fill="#FACC15" font-family="SFMono-Regular, Consolas, monospace" font-size="24">●</text>
   <text x="194" y="426" fill="#F8FAFC" font-family="SFMono-Regular, Consolas, monospace" font-size="24" font-weight="700">Codex CLI</text>
   <text x="194" y="468" fill="#94A3B8" font-family="SFMono-Regular, Consolas, monospace" font-size="20">Account     user@example.com (Plus)</text>
-  <text x="194" y="506" fill="#FACC15" font-family="SFMono-Regular, Consolas, monospace" font-size="20">5h limit    [███░░░░░░░░░] 26% left  resets 16:10</text>
+  <text x="194" y="506" fill="#FACC15" font-family="SFMono-Regular, Consolas, monospace" font-size="20">🟡 5h limit    [███░░░░░░░░░] 26% left  resets 16:10</text>
 
   <text x="154" y="576" fill="#64748B" font-family="SFMono-Regular, Consolas, monospace" font-size="24">○</text>
   <text x="194" y="576" fill="#F8FAFC" font-family="SFMono-Regular, Consolas, monospace" font-size="24" font-weight="700">Gemini CLI</text>

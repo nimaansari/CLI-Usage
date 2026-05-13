@@ -22,6 +22,22 @@ def _bar(remaining_pct):
     return f"[{'█'*filled}{'░'*(BAR_WIDTH-filled)}] {int(round(r))}% left"
 
 
+def _status_icon(remaining_pct):
+    """Emoji color cue that works in most native tray menus.
+
+    Native menu APIs do not consistently support arbitrary colored text, so we
+    use portable colored icons in the label itself.
+    """
+    if remaining_pct is None:
+        return "⚪"
+    r = float(remaining_pct)
+    if r < 10:
+        return "🔴"
+    if r < 30:
+        return "🟡"
+    return "🟢"
+
+
 def _parse_when(when):
     if when in (None, "", 0):
         return None
@@ -52,7 +68,7 @@ def _limit_row(label, used_pct, reset_when, kind, label_w=14):
     bar = _bar(remaining)
     rs  = _reset_str(reset_when, kind)
     tail = f"  ({rs})" if rs else ""
-    return f"  {label:<{label_w}} {bar}{tail}"
+    return f"  {_status_icon(remaining)} {label:<{label_w}} {bar}{tail}"
 
 
 def _http_json(url, headers, timeout=NET_TIMEOUT):

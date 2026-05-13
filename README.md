@@ -36,7 +36,7 @@
 - remaining usage/rate-limit windows
 - reset times
 - one-click terminal shortcuts for each installed CLI
-- low-usage warnings when limits are getting close
+- colored status icons in the menu text when limits are getting close
 
 ## Supported CLIs
 
@@ -51,10 +51,12 @@
 - Cross-platform tray frontend for **macOS**, **Windows**, and **Linux** using `pystray`
 - Native GTK/AppIndicator frontend for Linux desktops that support AppIndicator
 - Auto-refreshes every 60 seconds
-- Color-coded warning icon in the cross-platform frontend:
-  - green = healthy
-  - yellow = under 30% left
-  - red = under 10% left
+- Color-coded status cues in the app:
+  - 🟢 green = healthy
+  - 🟡 yellow = under 30% left
+  - 🔴 red = under 10% left
+- Cross-platform tray icon changes color when usage gets low
+- Menu rows include colored status icons beside each limit
 - GTK frontend switches to warning/error-style system icons when usage gets low
 - Login/startup installer scripts for Linux, macOS, and Windows
 - No token logging and no extra analytics
@@ -221,7 +223,7 @@ This is expected. The app currently detects Gemini auth status, but does not sho
 - [x] README badges and visual polish
 - [x] Mock preview image
 - [x] Simple logo/hero art
-- [x] Low-usage warning colors/icons
+- [x] Colored status icons in menu rows and tray icon
 - [ ] Native desktop notifications when usage is low
 - [ ] Configurable refresh interval
 - [ ] Package as a macOS app / Windows executable
