@@ -9,12 +9,10 @@ Run:
     python cli_usage_xplat.py
 """
 
-import platform
 import shutil
 import subprocess
 import sys
 import threading
-import time
 from datetime import datetime
 
 from PIL import Image, ImageDraw, ImageFont
@@ -32,6 +30,27 @@ IS_WIN = sys.platform.startswith("win")
 
 # ── icon ─────────────────────────────────────────────────────────────────────
 
+def _usage_state(pct):
+    """Return visual state for remaining usage percentage."""
+    if pct is None:
+        return "unknown"
+    if pct < 10:
+        return "critical"
+    if pct < 30:
+        return "warning"
+    return "healthy"
+
+
+def _state_colors(pct):
+    state = _usage_state(pct)
+    if state == "critical":
+        return (239, 68, 68, 255), (255, 255, 255, 255)   # red
+    if state == "warning":
+        return (250, 204, 21, 255), (20, 24, 35, 255)     # yellow
+    if state == "healthy":
+        return (34, 197, 94, 255), (255, 255, 255, 255)   # green
+    return (40, 90, 200, 255), (255, 255, 255, 255)       # blue
+
 def _icon_image(pct=None):
     """Generate a small icon. On macOS we render a template-style monochrome
     icon (Apple's menu bar tints it automatically when set_image with a name
@@ -41,13 +60,16 @@ def _icon_image(pct=None):
     img  = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d    = ImageDraw.Draw(img)
 
+    bg_color, fg_color = _state_colors(pct)
+
     # Filled rounded square as a backdrop so it's visible on any tray bg.
     if IS_MAC:
+        # Keep macOS mostly template-like, but add tiny status bars below.
         fg = (0, 0, 0, 255)
         bg = (0, 0, 0, 0)
     else:
-        fg = (255, 255, 255, 255)
-        bg = (40, 90, 200, 255)
+        fg = fg_color
+        bg = bg_color
 
     d.rounded_rectangle((2, 2, size - 2, size - 2), radius=12, fill=bg)
 
@@ -63,6 +85,15 @@ def _icon_image(pct=None):
     bbox = d.textbbox((0, 0), text, font=font)
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     d.text(((size - w) / 2 - bbox[0], (size - h) / 2 - bbox[1] - 2), text, fill=fg, font=font)
+
+    if pct is not None:
+        # Tiny usage bar at the bottom: full width means 100% left.
+        bar_x0, bar_y0, bar_x1, bar_y1 = 12, 52, 52, 58
+        d.rounded_rectangle((bar_x0, bar_y0, bar_x1, bar_y1), radius=3, fill=(255, 255, 255, 80) if not IS_MAC else (0, 0, 0, 45))
+        fill_w = int((bar_x1 - bar_x0) * max(0, min(100, pct)) / 100)
+        if fill_w > 0:
+            fill = bg_color if IS_MAC else fg_color
+            d.rounded_rectangle((bar_x0, bar_y0, bar_x0 + fill_w, bar_y1), radius=3, fill=fill)
     return img
 
 
@@ -136,6 +167,7 @@ class XPlatTray:
             self.data = {"_error": str(e)}
         worst = worst_remaining_pct(self.data)
         self.icon.title = f"cli-usage — {worst}% left" if worst is not None else "cli-usage"
+        self.icon.icon = _icon_image(worst)
         # Force menu redraw so the lazy items reflect new data.
         try:
             self.icon.update_menu()

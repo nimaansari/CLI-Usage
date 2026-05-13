@@ -1,0 +1,11 @@
+<svg width="960" height="260" viewBox="0 0 960 260" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="960" height="260" rx="42" fill="#0B1020"/>
+  <rect x="34" y="34" width="892" height="192" rx="28" fill="#111A33" stroke="#2E3B68" stroke-width="2"/>
+  <text x="82" y="153" fill="#E8F0FF" font-family="SFMono-Regular, Consolas, 'Liberation Mono', monospace" font-size="78" font-weight="800">CLI</text>
+  <text x="252" y="153" fill="#7CFFB2" font-family="SFMono-Regular, Consolas, 'Liberation Mono', monospace" font-size="78" font-weight="800">usage</text>
+  <rect x="660" y="78" width="42" height="102" rx="10" fill="#22C55E"/>
+  <rect x="722" y="112" width="42" height="68" rx="10" fill="#FACC15"/>
+  <rect x="784" y="140" width="42" height="40" rx="10" fill="#EF4444"/>
+  <path d="M82 188H580" stroke="#334068" stroke-width="10" stroke-linecap="round"/>
+  <path d="M82 188H388" stroke="#7CFFB2" stroke-width="10" stroke-linecap="round"/>
+</svg>

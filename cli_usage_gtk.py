@@ -23,6 +23,36 @@ REFRESH_SECONDS = 60
 TOOL_CMDS = {"Claude Code": "claude", "Codex CLI": "codex", "Gemini CLI": "gemini"}
 
 
+def usage_state(pct):
+    if pct is None:
+        return "unknown"
+    if pct < 10:
+        return "critical"
+    if pct < 30:
+        return "warning"
+    return "healthy"
+
+
+def usage_icon_name(pct):
+    state = usage_state(pct)
+    if state == "critical":
+        return "dialog-error"
+    if state == "warning":
+        return "dialog-warning"
+    return "dialog-information"
+
+
+def usage_prefix(pct):
+    state = usage_state(pct)
+    if state == "critical":
+        return "🔴"
+    if state == "warning":
+        return "🟡"
+    if state == "healthy":
+        return "🟢"
+    return "CLI"
+
+
 class AITray:
     def __init__(self):
         self.indicator = AppIndicator3.Indicator.new(
@@ -57,7 +87,8 @@ class AITray:
 
     def _rebuild(self, data):
         worst = worst_remaining_pct(data)
-        self.indicator.set_label(f"CLI {worst}%" if worst is not None else "CLI", "CLI 100%")
+        self.indicator.set_icon_full(usage_icon_name(worst), "cli-usage")
+        self.indicator.set_label(f"{usage_prefix(worst)} {worst}%" if worst is not None else "CLI", "CLI 100%")
 
         for c in self.menu.get_children():
             self.menu.remove(c)

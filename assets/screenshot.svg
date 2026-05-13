@@ -1,0 +1,27 @@
+<svg width="1040" height="680" viewBox="0 0 1040 680" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1040" height="680" rx="36" fill="#090E1A"/>
+  <rect x="112" y="58" width="816" height="564" rx="28" fill="#111827" stroke="#334155" stroke-width="2"/>
+  <rect x="112" y="58" width="816" height="58" rx="28" fill="#1E293B"/>
+  <circle cx="154" cy="87" r="8" fill="#EF4444"/>
+  <circle cx="182" cy="87" r="8" fill="#FACC15"/>
+  <circle cx="210" cy="87" r="8" fill="#22C55E"/>
+  <text x="250" y="96" fill="#CBD5E1" font-family="SFMono-Regular, Consolas, monospace" font-size="20">cli-usage tray preview</text>
+
+  <text x="154" y="162" fill="#E2E8F0" font-family="SFMono-Regular, Consolas, monospace" font-size="24" font-weight="700">cli-usage · 12:34</text>
+  <line x1="154" y1="188" x2="886" y2="188" stroke="#334155"/>
+
+  <text x="154" y="238" fill="#22C55E" font-family="SFMono-Regular, Consolas, monospace" font-size="24">●</text>
+  <text x="194" y="238" fill="#F8FAFC" font-family="SFMono-Regular, Consolas, monospace" font-size="24" font-weight="700">Claude Code</text>
+  <text x="194" y="280" fill="#94A3B8" font-family="SFMono-Regular, Consolas, monospace" font-size="20">Account     user@example.com (Max)</text>
+  <text x="194" y="318" fill="#CBD5E1" font-family="SFMono-Regular, Consolas, monospace" font-size="20">5h limit    [████████░░░░] 70% left  resets 14:00</text>
+  <text x="194" y="356" fill="#CBD5E1" font-family="SFMono-Regular, Consolas, monospace" font-size="20">Weekly      [██████░░░░░░] 52% left  resets Fri</text>
+
+  <text x="154" y="426" fill="#FACC15" font-family="SFMono-Regular, Consolas, monospace" font-size="24">●</text>
+  <text x="194" y="426" fill="#F8FAFC" font-family="SFMono-Regular, Consolas, monospace" font-size="24" font-weight="700">Codex CLI</text>
+  <text x="194" y="468" fill="#94A3B8" font-family="SFMono-Regular, Consolas, monospace" font-size="20">Account     user@example.com (Plus)</text>
+  <text x="194" y="506" fill="#FACC15" font-family="SFMono-Regular, Consolas, monospace" font-size="20">5h limit    [███░░░░░░░░░] 26% left  resets 16:10</text>
+
+  <text x="154" y="576" fill="#64748B" font-family="SFMono-Regular, Consolas, monospace" font-size="24">○</text>
+  <text x="194" y="576" fill="#F8FAFC" font-family="SFMono-Regular, Consolas, monospace" font-size="24" font-weight="700">Gemini CLI</text>
+  <text x="194" y="614" fill="#94A3B8" font-family="SFMono-Regular, Consolas, monospace" font-size="20">Auth        detected · usage unavailable</text>
+</svg>
