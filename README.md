@@ -8,6 +8,8 @@ A lightweight tray/menu-bar indicator for monitoring AI CLI usage and rate limit
 
 It shows installed tools, account/auth status, remaining rate-limit windows, reset times, and quick shortcuts to open each CLI in a terminal.
 
+> **Note:** This project was vibe coded — built quickly with AI-assisted flow, practical first, polished enough to ship.
+
 ## Why this exists
 
 If you use multiple AI CLIs, it is easy to lose track of which account is close to its limit. `cli-usage` keeps a small always-visible `CLI` indicator in your system tray/menu bar and refreshes usage data automatically.
