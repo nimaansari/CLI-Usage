@@ -256,6 +256,18 @@ python3 -m unittest discover -s tests -v
 tail -f /tmp/cli-usage.log
 ```
 
+### The tray icon looks like an error or "info" symbol
+
+The Linux GTK frontend uses stock icon-theme icons:
+
+| State | Triggered when | Icon name | Typical rendering |
+| --- | --- | --- | --- |
+| Healthy | ≥30% remaining | `dialog-information` | Blue circle with a white "i" |
+| Warning | <30% remaining | `dialog-warning` | Yellow triangle |
+| Critical | <10% remaining | `dialog-error` | Red icon |
+
+The blue "i" can look alarming, but it means usage is fine — there is no standard "success" icon in the freedesktop icon-theme spec, so `dialog-information` is the conventional substitute. The label text beside the icon (e.g. `🟢 39%`) is the authoritative status.
+
 ### Usage says unavailable
 
 Common causes:
