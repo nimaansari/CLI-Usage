@@ -252,7 +252,11 @@ def codex_data():
     try:
         u = validate_codex_usage(_http_json(
             "https://chatgpt.com/backend-api/codex/usage",
-            {"Authorization": f"Bearer {tok}", "User-Agent": "codex_cli_rs/ai-tray"},
+            {
+                "Authorization": f"Bearer {tok}",
+                "User-Agent": "codex_cli_rs/ai-tray",
+                "originator": "codex_cli_rs",
+            },
         ))
     except Exception as e:
         rows.append((f"  usage unavailable ({type(e).__name__})", False, None))
