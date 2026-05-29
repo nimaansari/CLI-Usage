@@ -6,6 +6,7 @@ Works on Linux, macOS, and Windows. Used by both the GTK and pystray frontends.
 import json
 import os
 import shutil
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -276,7 +277,8 @@ def codex_data():
         rows.append((_limit_row("Weekly limit", sw.get("used_percent"),
                                 sw.get("reset_at"), "week"), False, None))
 
-    for extra in (u.get("additional_rate_limits") or []):
+    additional = u.get("additional_rate_limits") or []
+    for extra in additional:
         name = extra.get("limit_name") or extra.get("metered_feature") or "Extra"
         erl  = extra.get("rate_limit") or {}
         epw  = erl.get("primary_window") or {}
@@ -294,7 +296,89 @@ def codex_data():
         bal = cr.get("balance", "")
         rows.append((_kv("Credits", "unlimited" if cr.get("unlimited") else f"${bal}"), False, None))
 
+    # Some plan tiers (e.g. "prolite") return all rate-limit fields as null.
+    # Without this branch the menu would just show Account/Plan and look broken.
+    # Surface anything else the API gave us so the user knows it's the plan, not the tray.
+    has_any_limit = bool(pw or sw or additional or cr.get("has_credits") or cr.get("unlimited"))
+    if not has_any_limit:
+        spend         = u.get("spend_control") or {}
+        reset_credits = u.get("rate_limit_reset_credits") or {}
+        spend_cap     = spend.get("individual_limit")
+        reset_avail   = reset_credits.get("available_count")
+        if spend.get("reached"):
+            rows.append(("  🔴 spend limit reached", False, None))
+        if spend_cap:
+            rows.append((_kv("Spend cap", f"${spend_cap}"), False, None))
+        if reset_avail:
+            rows.append((_kv("Reset credits", str(reset_avail)), False, None))
+
+    # Always try to add real consumption numbers from ccusage-codex if installed.
+    # Offline mode (-O) avoids the LiteLLM pricing fetch — keeps the call ~80ms.
+    rows.extend(_ccusage_codex_rows())
+
+    if not has_any_limit and len(rows) == 1:
+        # Account row only — nothing else surfaced
+        plan_label = plan or "unknown"
+        rows.append((f"  no usage data available (plan: {plan_label}, ccusage-codex not installed)", False, None))
+
     return {"installed": True, "rows": rows}
+
+
+def _ccusage_codex_rows():
+    """Shell out to `ccusage-codex --json -O` and produce 1-2 rows of consumption data.
+
+    Returns [] silently if the tool isn't installed, never raises.
+    OpenAI's `/usage` endpoint returns null for prolite plan; this is the only
+    way to actually show numbers for that plan.
+    """
+    rows = []
+    exe = shutil.which("ccusage-codex")
+    if not exe:
+        return rows
+    try:
+        # Monthly first (covers the current billing cycle), then today's slice
+        m = _run_json_cli([exe, "monthly", "--json", "-O"])
+        totals = (m or {}).get("totals") or {}
+        if totals.get("totalTokens"):
+            month_label = "This month"
+            months = (m or {}).get("monthly") or []
+            if months:
+                month_label = months[-1].get("month", month_label)
+            rows.append((_kv(month_label, f"{_fmt_n(totals['totalTokens'])} tok · ${totals.get('costUSD', 0):.2f}"), False, None))
+
+        d = _run_json_cli([exe, "daily", "--json", "-O"])
+        days = (d or {}).get("daily") or []
+        if days:
+            today = days[-1]
+            rows.append((_kv("  Latest day", f"{_fmt_n(today['totalTokens'])} tok · ${today.get('costUSD', 0):.2f} · {today.get('date','')}"), False, None))
+    except Exception:
+        # Swallow — the bare-bones API rows are still shown above
+        pass
+    return rows
+
+
+def _run_json_cli(cmd, timeout=10):
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if p.returncode != 0:
+        return None
+    out = p.stdout.strip()
+    # Some CLIs prepend log lines before the JSON object — find the first '{'
+    idx = out.find("{")
+    if idx == -1:
+        return None
+    return json.loads(out[idx:])
+
+
+def _fmt_n(n):
+    """Compact numeric format: 1234 → 1.2K, 12345678 → 12.3M."""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return str(n)
+    for unit, div in (("M", 1_000_000), ("K", 1_000)):
+        if n >= div:
+            return f"{n/div:.1f}{unit}"
+    return str(n)
 
 
 # ── Gemini CLI ───────────────────────────────────────────────────────────────
@@ -304,28 +388,62 @@ def gemini_data():
     if not shutil.which("gemini"):
         return {"installed": False, "rows": [("  not installed", False, None)]}
 
-    key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    src = None
-    if key:
-        src = "API key (env)"
-    else:
-        for p in [
-            Path.home() / ".gemini" / "oauth_creds.json",
-            Path.home() / ".config" / "gemini" / "credentials.json",
-            Path.home() / ".config" / "gcloud" / "application_default_credentials.json",
-            Path.home() / "AppData" / "Roaming" / "gcloud" / "application_default_credentials.json",
-            Path.home() / "Library" / "Application Support" / "gcloud" / "application_default_credentials.json",
-        ]:
-            if p.exists():
-                src = p.name
-                break
+    # Gemini has no public usage endpoint, so we surface the richest local state we can:
+    # account email, auth type, and OAuth token expiry. Beats a bare "usage unavailable".
+    env_key  = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    auth_kind = None
+    email     = None
+    expiry    = None
 
-    if not src:
+    if env_key:
+        auth_kind = "API key (env)"
+    else:
+        gem_dir   = Path.home() / ".gemini"
+        oauth     = gem_dir / "oauth_creds.json"
+        accounts  = gem_dir / "google_accounts.json"
+        if oauth.exists():
+            auth_kind = "OAuth (gemini-cli)"
+            try:
+                d  = json.loads(oauth.read_text())
+                ms = d.get("expiry_date")
+                if ms:
+                    expiry = datetime.fromtimestamp(ms / 1000).astimezone()
+            except Exception:
+                pass
+            if accounts.exists():
+                try:
+                    email = json.loads(accounts.read_text()).get("active")
+                except Exception:
+                    pass
+        else:
+            for p in [
+                Path.home() / ".config" / "gemini" / "credentials.json",
+                Path.home() / ".config" / "gcloud" / "application_default_credentials.json",
+                Path.home() / "AppData" / "Roaming" / "gcloud" / "application_default_credentials.json",
+                Path.home() / "Library" / "Application Support" / "gcloud" / "application_default_credentials.json",
+            ]:
+                if p.exists():
+                    auth_kind = p.name
+                    break
+
+    if not auth_kind:
         rows.append(("  no credentials found", False, None))
         return {"installed": True, "rows": rows}
 
-    rows.append((_kv("Auth", src), False, None))
-    rows.append(("  usage unavailable (no public endpoint)", False, None))
+    if email:
+        rows.append((_kv("Account", email), False, None))
+    rows.append((_kv("Auth", auth_kind), False, None))
+    if expiry:
+        now = datetime.now().astimezone()
+        if expiry < now:
+            rows.append((_kv("Token", "expired (auto-refreshes on next call)"), False, None))
+        else:
+            rows.append((_kv("Token", f"expires {expiry.strftime('%H:%M on %d %b').lstrip('0')}"), False, None))
+    # No public usage endpoint for the OAuth-personal flow Google ships with the
+    # Gemini CLI; the only way to see quotas is the API-key flow with a Google
+    # Cloud project. Tell the user that explicitly so the section doesn't look broken.
+    if auth_kind != "API key (env)":
+        rows.append(("  no usage numbers — Google doesn't expose them for OAuth-personal", False, None))
     return {"installed": True, "rows": rows}
 
 
