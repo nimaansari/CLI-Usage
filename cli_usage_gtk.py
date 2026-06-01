@@ -122,21 +122,61 @@ class AITray:
         ts = datetime.now().strftime("%H:%M")
         self._s(f"  cli-usage · {ts}")
 
+        # Refresh + Quit at the TOP so they stay reachable even when the
+        # body grows past the screen (GTK popup menus don't scroll cleanly).
+        self._action("  ↺  Refresh", self._do_refresh_click)
+        self._action("  ✕  Quit",    lambda: Gtk.main_quit())
+        self.menu.append(Gtk.SeparatorMenuItem())
+
+        # Each CLI becomes a submenu so the top-level stays short. Hovering the
+        # parent opens the detail rows. Works at any screen size.
         for name in ("Claude Code", "Codex CLI", "Gemini CLI"):
             info = data.get(name, {})
             sym  = "●" if info.get("installed") else "○"
-            self.menu.append(Gtk.SeparatorMenuItem())
-            self._s(f"  {sym}  {name}")
-            for text, *_ in info.get("rows", []):
-                self._s(text)
-            if info.get("installed"):
-                cmd = TOOL_CMDS[name]
-                self._action("     Open terminal…", lambda c=cmd: self._open(c))
+            summary = self._summary_for(name, info)
+            self._submenu(f"  {sym}  {name}{summary}", name, info)
 
-        self.menu.append(Gtk.SeparatorMenuItem())
-        self._action("  ↺  Refresh", self._do_refresh_click)
-        self._action("  ✕  Quit",    lambda: Gtk.main_quit())
         self.menu.show_all()
+
+    def _summary_for(self, name, info):
+        """One-line summary appended to the submenu parent label so the
+        top-level menu shows the headline at a glance without expanding."""
+        if not info.get("installed"):
+            return "  — not installed"
+        for text, *_ in info.get("rows", []):
+            # Lowest "N% left" wins as the headline
+            if "% left" in text:
+                pct = text.split("% left")[0].split()[-1]
+                return f"  · {pct}% left"
+        # Otherwise grab the Account line if present
+        for text, *_ in info.get("rows", []):
+            if "Account" in text:
+                # strip leading whitespace and the "Account" key
+                val = text.split("Account", 1)[1].strip()
+                return f"  · {val[:30]}"
+        return ""
+
+    def _submenu(self, parent_label, name, info):
+        item = Gtk.MenuItem(label=parent_label)
+        if item.get_child() and hasattr(item.get_child(), "set_markup"):
+            item.get_child().set_markup(markup_for_text(parent_label))
+        sub = Gtk.Menu()
+        for text, *_ in info.get("rows", []):
+            row = Gtk.MenuItem(label=text)
+            if row.get_child() and hasattr(row.get_child(), "set_markup"):
+                row.get_child().set_markup(markup_for_text(text))
+            row.set_sensitive(False)
+            sub.append(row)
+        if info.get("installed"):
+            cmd = TOOL_CMDS[name]
+            term_item = Gtk.MenuItem(label="     Open terminal…")
+            if term_item.get_child() and hasattr(term_item.get_child(), "set_markup"):
+                term_item.get_child().set_markup(
+                    f'<span foreground="#7c3aed" weight="bold">     Open terminal…</span>')
+            term_item.connect("activate", lambda _: self._open(cmd))
+            sub.append(term_item)
+        item.set_submenu(sub)
+        self.menu.append(item)
 
     def _s(self, text):
         item = Gtk.MenuItem(label=text)
