@@ -151,11 +151,16 @@ class XPlatTray:
                 yield Item(text, None, enabled=False)
             if info.get("installed"):
                 cmd = TOOL_CMDS[name]
-                yield Item("    Open terminal…", lambda _i, _it, c=cmd: open_terminal(c))
+                yield Item("    Open terminal…", self._make_open_terminal(cmd))
             yield Menu.SEPARATOR
 
         yield Item("Refresh", lambda _i, _it: self.refresh_now())
         yield Item("Quit",    lambda _i, _it: self.icon.stop())
+
+    @staticmethod
+    def _make_open_terminal(cmd):
+        # Bind cmd via a closure so the pystray action keeps exactly 2 params.
+        return lambda _i, _it: open_terminal(cmd)
 
     def refresh_now(self):
         threading.Thread(target=self._refresh, daemon=True).start()
