@@ -14,7 +14,9 @@ class InstallerTests(unittest.TestCase):
 
     def test_linux_autostart_writes_desktop_file_to_home(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"HOME": tmp}):
+            # Patch Path.home() directly: env-var patching is not portable
+            # (Path.home() reads HOME on POSIX but USERPROFILE on Windows).
+            with patch("install.Path.home", return_value=Path(tmp)):
                 entry = install.install_linux_autostart(Path("/app/cli_usage_xplat.py"), Path("/venv/bin/python"), dry_run=False)
                 self.assertTrue(entry.exists())
                 text = entry.read_text()
@@ -23,13 +25,13 @@ class InstallerTests(unittest.TestCase):
 
     def test_dry_run_does_not_write_linux_autostart(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"HOME": tmp}):
+            with patch("install.Path.home", return_value=Path(tmp)):
                 entry = install.install_linux_autostart(Path("/app/cli_usage_xplat.py"), Path("/venv/bin/python"), dry_run=True)
                 self.assertFalse(entry.exists())
 
     def test_macos_autostart_writes_plist_to_home(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"HOME": tmp}):
+            with patch("install.Path.home", return_value=Path(tmp)):
                 entry = install.install_macos_autostart(Path("/app/cli_usage_xplat.py"), Path("/venv/bin/python"), dry_run=False)
                 self.assertTrue(entry.exists())
                 text = entry.read_text()
