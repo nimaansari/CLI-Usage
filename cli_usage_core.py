@@ -22,6 +22,9 @@ NET_BACKOFF = 0.6
 # long would freeze the whole refresh thread (and every provider it fetches in
 # sequence), so we bail out and let the next scheduled refresh try again.
 NET_MAX_RETRY_DELAY = 15
+# Usage endpoints are rate-limited, so re-fetch them at most this often even
+# though the tray menu refreshes more frequently (see _cached_usage).
+USAGE_TTL = 300
 
 
 def _bar(remaining_pct):
@@ -143,6 +146,42 @@ def _http_json(url, headers, timeout=NET_TIMEOUT, retries=NET_RETRIES, backoff=N
     raise last_exc
 
 
+_USAGE_CACHE = {}  # provider name -> (monotonic_ts, validated_data)
+
+
+def _cached_usage(name, fetch_fn, ttl=USAGE_TTL):
+    """Fetch provider usage through a small TTL cache.
+
+    Returns (data, age_seconds, served_on_error). The menu refreshes every ~60s
+    but these endpoints are rate-limited, so we hit the network at most once per
+    `ttl`. If a refresh fails (e.g. HTTP 429) we keep serving the last good
+    payload instead of blanking the display; served_on_error flags that case.
+    """
+    now = time.monotonic()
+    cached = _USAGE_CACHE.get(name)
+    if cached is not None and (now - cached[0]) < ttl:
+        return cached[1], now - cached[0], False
+    try:
+        data = fetch_fn()
+    except Exception:
+        if cached is not None:
+            return cached[1], now - cached[0], True
+        raise
+    _USAGE_CACHE[name] = (now, data)
+    return data, 0.0, False
+
+
+def _fmt_age(seconds):
+    """Compact age: 30s, 4m, 2h."""
+    s = int(seconds)
+    if s < 90:
+        return f"{s}s"
+    m = s // 60
+    if m < 90:
+        return f"{m}m"
+    return f"{m // 60}h"
+
+
 def validate_claude_usage(data):
     data = _as_dict(data, "Claude usage")
     for key in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
@@ -207,7 +246,7 @@ def claude_data():
 
     if tok:
         try:
-            u = validate_claude_usage(_http_json(
+            u, age, stale = _cached_usage("claude", lambda: validate_claude_usage(_http_json(
                 "https://api.anthropic.com/api/oauth/usage",
                 {
                     "Authorization":     f"Bearer {tok}",
@@ -215,10 +254,13 @@ def claude_data():
                     "anthropic-version": "2023-06-01",
                     "User-Agent":        "claude-code/ai-tray",
                 },
-            ))
+            )))
         except Exception as e:
             rows.append((f"  usage unavailable ({type(e).__name__})", False, None))
             return {"installed": True, "rows": rows}
+
+        if stale:
+            rows.append((f"  ⚪ usage {_fmt_age(age)} old — refresh failed", False, None))
 
         for label, key, kind in [
             ("5h limit",      "five_hour",        "5h"),
@@ -260,14 +302,14 @@ def codex_data():
         return {"installed": True, "rows": rows}
 
     try:
-        u = validate_codex_usage(_http_json(
+        u, age, stale = _cached_usage("codex", lambda: validate_codex_usage(_http_json(
             "https://chatgpt.com/backend-api/codex/usage",
             {
                 "Authorization": f"Bearer {tok}",
                 "User-Agent": "codex_cli_rs/ai-tray",
                 "originator": "codex_cli_rs",
             },
-        ))
+        )))
     except Exception as e:
         rows.append((f"  usage unavailable ({type(e).__name__})", False, None))
         return {"installed": True, "rows": rows}
@@ -275,6 +317,8 @@ def codex_data():
     email = u.get("email", "")
     plan  = (u.get("plan_type") or "").title()
     rows.append((_kv("Account", email + (f" ({plan})" if plan else "")), False, None))
+    if stale:
+        rows.append((f"  ⚪ usage {_fmt_age(age)} old — refresh failed", False, None))
 
     rl = u.get("rate_limit") or {}
     pw = rl.get("primary_window") or {}

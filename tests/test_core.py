@@ -87,5 +87,68 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 1)
 
 
+class UsageCacheTests(unittest.TestCase):
+    def setUp(self):
+        core._USAGE_CACHE.clear()
+
+    def test_fetches_and_caches_then_serves_within_ttl(self):
+        calls = []
+        def fetch():
+            calls.append(1)
+            return {"n": len(calls)}
+        clock = [1000.0]
+        with patch("cli_usage_core.time.monotonic", lambda: clock[0]):
+            d1, a1, s1 = core._cached_usage("x", fetch, ttl=300)
+            clock[0] = 1100.0  # 100s later, within TTL -> cache hit, no fetch
+            d2, a2, s2 = core._cached_usage("x", fetch, ttl=300)
+        self.assertEqual(d1, {"n": 1})
+        self.assertEqual(d2, {"n": 1})
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(s2)
+        self.assertAlmostEqual(a2, 100.0)
+
+    def test_refetches_after_ttl(self):
+        calls = []
+        def fetch():
+            calls.append(1)
+            return {"n": len(calls)}
+        clock = [1000.0]
+        with patch("cli_usage_core.time.monotonic", lambda: clock[0]):
+            core._cached_usage("x", fetch, ttl=300)
+            clock[0] = 1400.0  # 400s later, past TTL -> refetch
+            d, a, s = core._cached_usage("x", fetch, ttl=300)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(d, {"n": 2})
+        self.assertFalse(s)
+
+    def test_serves_stale_on_error(self):
+        state = {"fail": False}
+        def fetch():
+            if state["fail"]:
+                raise RuntimeError("429")
+            return {"ok": True}
+        clock = [1000.0]
+        with patch("cli_usage_core.time.monotonic", lambda: clock[0]):
+            core._cached_usage("x", fetch, ttl=300)  # cache a good value
+            clock[0] = 1400.0                         # past TTL -> refetch attempt
+            state["fail"] = True
+            d, a, s = core._cached_usage("x", fetch, ttl=300)
+        self.assertEqual(d, {"ok": True})  # last good value, not blanked
+        self.assertTrue(s)
+        self.assertAlmostEqual(a, 400.0)
+
+    def test_error_without_cache_raises(self):
+        def fetch():
+            raise RuntimeError("boom")
+        with patch("cli_usage_core.time.monotonic", lambda: 1000.0):
+            with self.assertRaises(RuntimeError):
+                core._cached_usage("y", fetch)
+
+    def test_fmt_age(self):
+        self.assertEqual(core._fmt_age(30), "30s")
+        self.assertEqual(core._fmt_age(120), "2m")
+        self.assertEqual(core._fmt_age(7200), "2h")
+
+
 if __name__ == "__main__":
     unittest.main()
