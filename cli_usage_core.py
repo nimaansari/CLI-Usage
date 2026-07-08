@@ -17,6 +17,11 @@ BAR_WIDTH   = 12
 NET_TIMEOUT = 6
 NET_RETRIES = 3
 NET_BACKOFF = 0.6
+# Cap how long a single call will block on a retry. The usage endpoints can
+# return a Retry-After of thousands of seconds when rate-limited; sleeping that
+# long would freeze the whole refresh thread (and every provider it fetches in
+# sequence), so we bail out and let the next scheduled refresh try again.
+NET_MAX_RETRY_DELAY = 15
 
 
 def _bar(remaining_pct):
@@ -125,6 +130,10 @@ def _http_json(url, headers, timeout=NET_TIMEOUT, retries=NET_RETRIES, backoff=N
             if not should_retry or attempt == retries - 1:
                 raise
             delay = float(retry_after) if retry_after and retry_after.isdigit() else backoff * (2 ** attempt)
+            # Don't block the refresh thread for minutes on a long Retry-After;
+            # give up now and let the next scheduled refresh retry.
+            if delay > NET_MAX_RETRY_DELAY:
+                raise
             time.sleep(delay)
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             last_exc = exc
