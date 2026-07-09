@@ -108,11 +108,20 @@ def open_terminal(cmd):
                           "-e", 'tell application "Terminal" to activate'])
         return
     if IS_WIN:
-        # Use Windows Terminal if available; fall back to cmd.exe.
-        if shutil.which("wt.exe"):
-            subprocess.Popen(["wt.exe", "-w", "0", "nt", "cmd", "/k", cmd])
-        else:
-            subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", cmd], shell=False)
+        # The tray runs under pythonw.exe, which has NO console. To pop a
+        # visible terminal we must force a brand-new console with
+        # CREATE_NEW_CONSOLE — the old "cmd /c start" trick silently fails to
+        # show a window from a console-less GUI parent.
+        try:
+            if shutil.which("wt.exe"):
+                subprocess.Popen(["wt.exe", "nt", "cmd", "/k", cmd])
+            else:
+                subprocess.Popen(["cmd", "/k", cmd],
+                                 creationflags=subprocess.CREATE_NEW_CONSOLE)
+        except Exception:
+            # Last-ditch fallback (list form, no shell): explicit empty window
+            # title so `start` doesn't consume the command as the title.
+            subprocess.Popen(["cmd", "/c", "start", "", "cmd", "/k", cmd])
         return
     # Linux fallback.
     for term in ("gnome-terminal", "konsole", "xfce4-terminal", "xterm"):
