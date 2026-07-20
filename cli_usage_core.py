@@ -226,6 +226,20 @@ def _fmt_age(seconds):
     return f"{m // 60}h"
 
 
+def _usage_error_row(exc, relogin_hint):
+    """Turn a usage-fetch failure into an actionable menu message.
+
+    401 = the token expired; 403 = the token lacks the needed scope. Both are
+    fixed by re-authenticating, so surface that instead of a cryptic HTTPError.
+    """
+    code = getattr(exc, "code", None)
+    if code == 401:
+        return f"  ⚪ usage unavailable — token expired ({relogin_hint})"
+    if code == 403:
+        return f"  ⚪ usage unavailable — re-login needed ({relogin_hint})"
+    return f"  usage unavailable ({type(exc).__name__})"
+
+
 def validate_claude_usage(data):
     data = _as_dict(data, "Claude usage")
     for key in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
@@ -305,7 +319,7 @@ def claude_data():
                 },
             )))
         except Exception as e:
-            rows.append((f"  usage unavailable ({type(e).__name__})", False, None))
+            rows.append((_usage_error_row(e, "run: claude → /login"), False, None))
             return {"installed": True, "rows": rows}
 
         if stale:
@@ -372,7 +386,7 @@ def codex_data():
             },
         )))
     except Exception as e:
-        rows.append((f"  usage unavailable ({type(e).__name__})", False, None))
+        rows.append((_usage_error_row(e, "run: codex login"), False, None))
         return {"installed": True, "rows": rows}
 
     email = u.get("email", "")

@@ -188,5 +188,22 @@ class ApiShapeTests(unittest.TestCase):
                          ("Weekly limit", "week"))
 
 
+class UsageErrorMessageTests(unittest.TestCase):
+    def _http(self, code):
+        return urllib.error.HTTPError("u", code, "x", {}, io.BytesIO())
+
+    def test_401_says_token_expired(self):
+        msg = core._usage_error_row(self._http(401), "codex login")
+        self.assertIn("token expired", msg)
+        self.assertIn("codex login", msg)
+
+    def test_403_says_relogin(self):
+        msg = core._usage_error_row(self._http(403), "claude → /login")
+        self.assertIn("re-login needed", msg)
+
+    def test_other_error_is_generic(self):
+        self.assertIn("ValueError", core._usage_error_row(ValueError("boom"), "x"))
+
+
 if __name__ == "__main__":
     unittest.main()

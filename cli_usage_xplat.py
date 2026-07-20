@@ -108,20 +108,20 @@ def open_terminal(cmd):
                           "-e", 'tell application "Terminal" to activate'])
         return
     if IS_WIN:
-        # The tray runs under pythonw.exe, which has NO console. To pop a
-        # visible terminal we must force a brand-new console with
-        # CREATE_NEW_CONSOLE — the old "cmd /c start" trick silently fails to
-        # show a window from a console-less GUI parent.
+        # The tray runs under pythonw.exe, which has NO console, so force a
+        # brand-new console with CREATE_NEW_CONSOLE. Open PowerShell (pwsh if
+        # present, else Windows PowerShell); -NoExit keeps the window open after
+        # the command runs, like cmd's /k.
+        shell = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
         try:
             if shutil.which("wt.exe"):
-                subprocess.Popen(["wt.exe", "nt", "cmd", "/k", cmd])
+                subprocess.Popen(["wt.exe", "nt", shell, "-NoExit", "-Command", cmd])
             else:
-                subprocess.Popen(["cmd", "/k", cmd],
+                subprocess.Popen([shell, "-NoExit", "-Command", cmd],
                                  creationflags=subprocess.CREATE_NEW_CONSOLE)
         except Exception:
-            # Last-ditch fallback (list form, no shell): explicit empty window
-            # title so `start` doesn't consume the command as the title.
-            subprocess.Popen(["cmd", "/c", "start", "", "cmd", "/k", cmd])
+            # Last-ditch fallback (list form, no shell): explicit empty window title.
+            subprocess.Popen(["cmd", "/c", "start", "", shell, "-NoExit", "-Command", cmd])
         return
     # Linux fallback.
     for term in ("gnome-terminal", "konsole", "xfce4-terminal", "xterm"):
