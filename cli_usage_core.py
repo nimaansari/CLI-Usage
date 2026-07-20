@@ -84,6 +84,50 @@ def _limit_row(label, used_pct, reset_when, kind, label_w=14):
     return f"  {_status_icon(remaining)} {label:<{label_w}} {bar}{tail}"
 
 
+def _claude_limit_label(entry):
+    """Label + reset-kind for one entry of Anthropic's limits[] array.
+
+    Per-model entries carry scope.model.display_name (e.g. "Fable"); others are
+    identified by kind ("session" = 5h, "weekly_all" = the overall weekly cap).
+    """
+    scope = entry.get("scope") or {}
+    model = scope.get("model") or {} if isinstance(scope, dict) else {}
+    name  = model.get("display_name")
+    if name:
+        return f"Weekly {name}", "week"
+    kind = entry.get("kind") or ""
+    group = entry.get("group") or ""
+    if kind == "session" or group == "session":
+        return "5h limit", "5h"
+    if kind == "weekly_all":
+        return "Weekly limit", "week"
+    # Generic fallback for any future kind so it still renders something sane.
+    label = (group or kind or "Limit").replace("_", " ").title()
+    return label, ("5h" if "session" in (group or kind) else "week")
+
+
+def _codex_window_label(window, default_label, default_kind):
+    """Derive a Codex window's label from its actual duration.
+
+    OpenAI stopped guaranteeing that primary_window == 5h; a Plus account can
+    return the weekly window as the primary. Read limit_window_seconds and label
+    by duration. Falls back to the given defaults when the field is absent so
+    older payload shapes are unaffected.
+    """
+    secs = (window or {}).get("limit_window_seconds")
+    try:
+        secs = int(secs)
+    except (TypeError, ValueError):
+        return default_label, default_kind
+    if secs <= 0:
+        return default_label, default_kind
+    if secs <= 24 * 3600:
+        hours = max(1, round(secs / 3600))
+        return f"{hours}h limit", "5h"
+    days = max(1, round(secs / 86400))
+    return ("Weekly limit" if days == 7 else f"{days}d limit"), "week"
+
+
 class ProviderResponseError(ValueError):
     """Raised when a provider returns JSON in an unexpected shape."""
 
@@ -187,6 +231,11 @@ def validate_claude_usage(data):
     for key in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
         window = _as_optional_dict(data.get(key), key)
         _as_optional_number(window.get("utilization"), f"{key}.utilization")
+    # Newer payloads move per-model limits into a generic limits[] array; each
+    # entry carries a percent and optional scope.model.display_name.
+    for i, lim in enumerate(_as_optional_list(data.get("limits"), "limits")):
+        lim = _as_dict(lim, f"limits[{i}]")
+        _as_optional_number(lim.get("percent"), f"limits[{i}].percent")
     extra = _as_optional_dict(data.get("extra_usage"), "extra_usage")
     _as_optional_number(extra.get("utilization"), "extra_usage.utilization")
     return data
@@ -262,16 +311,28 @@ def claude_data():
         if stale:
             rows.append((f"  ⚪ usage {_fmt_age(age)} old — refresh failed", False, None))
 
-        for label, key, kind in [
-            ("5h limit",      "five_hour",        "5h"),
-            ("Weekly limit",  "seven_day",        "week"),
-            ("Weekly Opus",   "seven_day_opus",   "week"),
-            ("Weekly Sonnet", "seven_day_sonnet", "week"),
-        ]:
-            w = u.get(key) or {}
-            if w.get("utilization") is not None:
-                rows.append((_limit_row(label, w.get("utilization"),
-                                        w.get("resets_at"), kind), False, None))
+        limits = u.get("limits") or []
+        if limits:
+            # Newer payload: render every entry from the generic limits[] array,
+            # so per-model caps (Opus/Sonnet/Fable/…) appear automatically.
+            for entry in limits:
+                pct = entry.get("percent")
+                if pct is None:
+                    continue
+                label, kind = _claude_limit_label(entry)
+                rows.append((_limit_row(label, pct, entry.get("resets_at"), kind), False, None))
+        else:
+            # Fallback for the older payload shape (pre-limits[]).
+            for label, key, kind in [
+                ("5h limit",      "five_hour",        "5h"),
+                ("Weekly limit",  "seven_day",        "week"),
+                ("Weekly Opus",   "seven_day_opus",   "week"),
+                ("Weekly Sonnet", "seven_day_sonnet", "week"),
+            ]:
+                w = u.get(key) or {}
+                if w.get("utilization") is not None:
+                    rows.append((_limit_row(label, w.get("utilization"),
+                                            w.get("resets_at"), kind), False, None))
 
         eu = u.get("extra_usage") or {}
         if eu.get("is_enabled") and eu.get("utilization") is not None:
@@ -324,11 +385,13 @@ def codex_data():
     pw = rl.get("primary_window") or {}
     sw = rl.get("secondary_window") or {}
     if pw:
-        rows.append((_limit_row("5h limit", pw.get("used_percent"),
-                                pw.get("reset_at"), "5h"), False, None))
+        lbl, kind = _codex_window_label(pw, "5h limit", "5h")
+        rows.append((_limit_row(lbl, pw.get("used_percent"),
+                                pw.get("reset_at"), kind), False, None))
     if sw:
-        rows.append((_limit_row("Weekly limit", sw.get("used_percent"),
-                                sw.get("reset_at"), "week"), False, None))
+        lbl, kind = _codex_window_label(sw, "Weekly limit", "week")
+        rows.append((_limit_row(lbl, sw.get("used_percent"),
+                                sw.get("reset_at"), kind), False, None))
 
     additional = u.get("additional_rate_limits") or []
     for extra in additional:
@@ -338,11 +401,13 @@ def codex_data():
         esw  = erl.get("secondary_window") or {}
         rows.append((f"  {name} limit:", False, None))
         if epw:
-            rows.append((_limit_row("  5h", epw.get("used_percent"),
-                                    epw.get("reset_at"), "5h"), False, None))
+            lbl, kind = _codex_window_label(epw, "5h limit", "5h")
+            rows.append((_limit_row("  " + lbl, epw.get("used_percent"),
+                                    epw.get("reset_at"), kind), False, None))
         if esw:
-            rows.append((_limit_row("  Weekly", esw.get("used_percent"),
-                                    esw.get("reset_at"), "week"), False, None))
+            lbl, kind = _codex_window_label(esw, "Weekly limit", "week")
+            rows.append((_limit_row("  " + lbl, esw.get("used_percent"),
+                                    esw.get("reset_at"), kind), False, None))
 
     cr = u.get("credits") or {}
     if cr.get("has_credits") or cr.get("unlimited"):

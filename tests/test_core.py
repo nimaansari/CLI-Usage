@@ -150,5 +150,43 @@ class UsageCacheTests(unittest.TestCase):
         self.assertEqual(core._fmt_age(7200), "2h")
 
 
+class ApiShapeTests(unittest.TestCase):
+    # ── Anthropic limits[] array ──────────────────────────────────────────
+    def test_claude_limit_label_session_and_weekly(self):
+        self.assertEqual(core._claude_limit_label({"kind": "session"}), ("5h limit", "5h"))
+        self.assertEqual(core._claude_limit_label({"kind": "weekly_all"}), ("Weekly limit", "week"))
+
+    def test_claude_limit_label_scoped_model(self):
+        entry = {"kind": "weekly_scoped", "scope": {"model": {"display_name": "Fable"}}}
+        self.assertEqual(core._claude_limit_label(entry), ("Weekly Fable", "week"))
+
+    def test_claude_limit_label_generic_fallback(self):
+        self.assertEqual(core._claude_limit_label({"kind": "monthly_all", "group": "monthly"}),
+                         ("Monthly", "week"))
+
+    def test_validate_claude_usage_accepts_limits_array(self):
+        payload = {"limits": [{"kind": "weekly_scoped", "percent": 23,
+                               "scope": {"model": {"display_name": "Fable"}}}]}
+        self.assertIs(core.validate_claude_usage(payload), payload)
+
+    def test_validate_claude_usage_rejects_bad_limit_percent(self):
+        with self.assertRaises(core.ProviderResponseError):
+            core.validate_claude_usage({"limits": [{"percent": "nope"}]})
+
+    # ── Codex window labels from duration ─────────────────────────────────
+    def test_codex_window_label_by_duration(self):
+        self.assertEqual(core._codex_window_label({"limit_window_seconds": 18000}, "x", "y"),
+                         ("5h limit", "5h"))
+        self.assertEqual(core._codex_window_label({"limit_window_seconds": 604800}, "x", "y"),
+                         ("Weekly limit", "week"))
+        self.assertEqual(core._codex_window_label({"limit_window_seconds": 259200}, "x", "y"),
+                         ("3d limit", "week"))
+
+    def test_codex_window_label_fallback_when_absent(self):
+        self.assertEqual(core._codex_window_label({}, "5h limit", "5h"), ("5h limit", "5h"))
+        self.assertEqual(core._codex_window_label({"limit_window_seconds": None}, "Weekly limit", "week"),
+                         ("Weekly limit", "week"))
+
+
 if __name__ == "__main__":
     unittest.main()
