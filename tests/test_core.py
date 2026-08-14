@@ -66,6 +66,137 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(core.ProviderResponseError):
             core.validate_codex_usage({"additional_rate_limits": "wrong"})
 
+    def test_validate_claude_usage_accepts_limits_array(self):
+        payload = {
+            "five_hour": {"utilization": 5},
+            "limits": [
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 23,
+                 "scope": {"model": {"display_name": "Fable"}}},
+            ],
+        }
+        self.assertIs(core.validate_claude_usage(payload), payload)
+
+    def test_validate_claude_usage_rejects_bad_limit_percent(self):
+        with self.assertRaises(core.ProviderResponseError):
+            core.validate_claude_usage({"limits": [{"percent": "nope"}]})
+
+
+class ClaudeModelBarometerTests(unittest.TestCase):
+    def setUp(self):
+        core._USAGE_CACHE.clear()  # usage is TTL-cached; isolate each test
+
+    def _rows(self, payload):
+        creds = json.dumps({"claudeAiOauth": {"accessToken": "tok"}})
+        with patch("cli_usage_core.shutil.which", return_value="/usr/bin/claude"), \
+             patch("cli_usage_core.Path.exists", return_value=True), \
+             patch("cli_usage_core.Path.read_text", return_value=creds), \
+             patch("cli_usage_core._http_json", return_value=payload):
+            return [r[0] for r in core.claude_data()["rows"]]
+
+    def test_weekly_scoped_model_renders_named_row(self):
+        rows = self._rows({
+            "five_hour": {"utilization": 6, "resets_at": None},
+            "seven_day": {"utilization": 29, "resets_at": None},
+            "limits": [
+                {"group": "weekly", "percent": 23, "resets_at": None,
+                 "scope": {"model": {"display_name": "Fable"}}},
+            ],
+        })
+        self.assertTrue(any("Weekly Fable" in r and "77% left" in r for r in rows))
+
+    def test_summary_reports_5h_and_weekly_remaining(self):
+        creds = json.dumps({"claudeAiOauth": {"accessToken": "tok"}})
+        payload = {
+            "five_hour": {"utilization": 6, "resets_at": None},
+            "seven_day": {"utilization": 29, "resets_at": None},
+        }
+        with patch("cli_usage_core.shutil.which", return_value="/usr/bin/claude"), \
+             patch("cli_usage_core.Path.exists", return_value=True), \
+             patch("cli_usage_core.Path.read_text", return_value=creds), \
+             patch("cli_usage_core._http_json", return_value=payload):
+            summary = core.claude_data()["summary"]
+        self.assertEqual(summary, {"5h": 94, "weekly": 71})
+
+    def test_unscoped_limits_do_not_duplicate_rows(self):
+        rows = self._rows({
+            "seven_day": {"utilization": 29, "resets_at": None},
+            "limits": [
+                {"kind": "weekly_all", "group": "weekly", "percent": 29},
+                {"group": "session", "percent": 5},
+            ],
+        })
+        # Only the top-level Weekly row; unscoped limits[] entries are skipped.
+        self.assertEqual(sum("Weekly" in r for r in rows), 1)
+
+
+class CodexDetectionTests(unittest.TestCase):
+    def setUp(self):
+        core._USAGE_CACHE.clear()  # usage is TTL-cached; isolate each test
+
+    def test_installed_via_auth_file_when_not_on_path(self):
+        # Simulates a systemd user service whose PATH lacks the nvm bin dir:
+        # `codex` is not resolvable but ~/.codex/auth.json exists.
+        payload = {"email": "x@y.z", "plan_type": "plus", "rate_limit": {}}
+        with patch("cli_usage_core.shutil.which", return_value=None), \
+             patch("cli_usage_core.Path.exists", return_value=True), \
+             patch("cli_usage_core.Path.read_text",
+                   return_value=json.dumps({"tokens": {"access_token": "t"}})), \
+             patch("cli_usage_core._http_json", return_value=payload):
+            result = core.codex_data()
+        self.assertTrue(result["installed"])
+        self.assertFalse(any("not installed" in r[0] for r in result["rows"]))
+
+    def test_not_installed_when_no_binary_and_no_auth(self):
+        with patch("cli_usage_core.shutil.which", return_value=None), \
+             patch("cli_usage_core.Path.exists", return_value=False):
+            result = core.codex_data()
+        self.assertFalse(result["installed"])
+        self.assertEqual(result["summary"], {"5h": None, "weekly": None})
+
+    def test_summary_maps_weekly_only_plan(self):
+        # Plus plan: primary_window is the weekly window, no 5h.
+        payload = {"email": "x@y.z", "plan_type": "plus", "rate_limit": {
+            "primary_window": {"used_percent": 15, "limit_window_seconds": 604800},
+        }}
+        with patch("cli_usage_core.shutil.which", return_value=None), \
+             patch("cli_usage_core.Path.exists", return_value=True), \
+             patch("cli_usage_core.Path.read_text",
+                   return_value=json.dumps({"tokens": {"access_token": "t"}})), \
+             patch("cli_usage_core._http_json", return_value=payload):
+            summary = core.codex_data()["summary"]
+        self.assertEqual(summary, {"5h": None, "weekly": 85})
+
+
+class CodexWindowLabelTests(unittest.TestCase):
+    def test_weekly_window_by_duration(self):
+        label, kind = core._codex_window_label({"limit_window_seconds": 604800})
+        self.assertEqual((label, kind), ("Weekly limit", "week"))
+
+    def test_five_hour_window_by_duration(self):
+        label, kind = core._codex_window_label({"limit_window_seconds": 18000})
+        self.assertEqual((label, kind), ("5h limit", "5h"))
+
+    def test_missing_duration_uses_fallback(self):
+        self.assertEqual(core._codex_window_label({}, "Weekly limit", "week"),
+                         ("Weekly limit", "week"))
+
+
+class ErrorRowTests(unittest.TestCase):
+    def test_http_401_maps_to_relogin_row(self):
+        error = urllib.error.HTTPError("url", 401, "unauthorized", {}, io.BytesIO())
+        rows = core._usage_error_rows(error, "codex login")
+        self.assertIn("re-login required", rows[0][0])
+        self.assertIn("codex login", rows[0][0])
+
+    def test_other_http_error_shows_status_code(self):
+        error = urllib.error.HTTPError("url", 503, "down", {}, io.BytesIO())
+        rows = core._usage_error_rows(error, "codex login")
+        self.assertIn("HTTP 503", rows[0][0])
+
+    def test_non_http_error_shows_type_name(self):
+        rows = core._usage_error_rows(TimeoutError(), "codex login")
+        self.assertIn("TimeoutError", rows[0][0])
+
 
 class HttpTests(unittest.TestCase):
     @patch("cli_usage_core.time.sleep", return_value=None)
@@ -148,61 +279,6 @@ class UsageCacheTests(unittest.TestCase):
         self.assertEqual(core._fmt_age(30), "30s")
         self.assertEqual(core._fmt_age(120), "2m")
         self.assertEqual(core._fmt_age(7200), "2h")
-
-
-class ApiShapeTests(unittest.TestCase):
-    # ── Anthropic limits[] array ──────────────────────────────────────────
-    def test_claude_limit_label_session_and_weekly(self):
-        self.assertEqual(core._claude_limit_label({"kind": "session"}), ("5h limit", "5h"))
-        self.assertEqual(core._claude_limit_label({"kind": "weekly_all"}), ("Weekly limit", "week"))
-
-    def test_claude_limit_label_scoped_model(self):
-        entry = {"kind": "weekly_scoped", "scope": {"model": {"display_name": "Fable"}}}
-        self.assertEqual(core._claude_limit_label(entry), ("Weekly Fable", "week"))
-
-    def test_claude_limit_label_generic_fallback(self):
-        self.assertEqual(core._claude_limit_label({"kind": "monthly_all", "group": "monthly"}),
-                         ("Monthly", "week"))
-
-    def test_validate_claude_usage_accepts_limits_array(self):
-        payload = {"limits": [{"kind": "weekly_scoped", "percent": 23,
-                               "scope": {"model": {"display_name": "Fable"}}}]}
-        self.assertIs(core.validate_claude_usage(payload), payload)
-
-    def test_validate_claude_usage_rejects_bad_limit_percent(self):
-        with self.assertRaises(core.ProviderResponseError):
-            core.validate_claude_usage({"limits": [{"percent": "nope"}]})
-
-    # ── Codex window labels from duration ─────────────────────────────────
-    def test_codex_window_label_by_duration(self):
-        self.assertEqual(core._codex_window_label({"limit_window_seconds": 18000}, "x", "y"),
-                         ("5h limit", "5h"))
-        self.assertEqual(core._codex_window_label({"limit_window_seconds": 604800}, "x", "y"),
-                         ("Weekly limit", "week"))
-        self.assertEqual(core._codex_window_label({"limit_window_seconds": 259200}, "x", "y"),
-                         ("3d limit", "week"))
-
-    def test_codex_window_label_fallback_when_absent(self):
-        self.assertEqual(core._codex_window_label({}, "5h limit", "5h"), ("5h limit", "5h"))
-        self.assertEqual(core._codex_window_label({"limit_window_seconds": None}, "Weekly limit", "week"),
-                         ("Weekly limit", "week"))
-
-
-class UsageErrorMessageTests(unittest.TestCase):
-    def _http(self, code):
-        return urllib.error.HTTPError("u", code, "x", {}, io.BytesIO())
-
-    def test_401_says_token_expired(self):
-        msg = core._usage_error_row(self._http(401), "codex login")
-        self.assertIn("token expired", msg)
-        self.assertIn("codex login", msg)
-
-    def test_403_says_relogin(self):
-        msg = core._usage_error_row(self._http(403), "claude → /login")
-        self.assertIn("re-login needed", msg)
-
-    def test_other_error_is_generic(self):
-        self.assertIn("ValueError", core._usage_error_row(ValueError("boom"), "x"))
 
 
 if __name__ == "__main__":

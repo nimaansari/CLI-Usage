@@ -22,7 +22,7 @@ from pystray import MenuItem as Item, Menu
 from cli_usage_core import fetch_all, worst_remaining_pct
 
 REFRESH_SECONDS = 60
-TOOL_CMDS = {"Claude Code": "claude", "Codex CLI": "codex", "Gemini CLI": "gemini"}
+TOOL_CMDS = {"Claude Code": "claude", "Codex CLI": "codex"}
 
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform.startswith("win")
@@ -152,7 +152,7 @@ class XPlatTray:
         yield Item(f"cli-usage · {ts}", None, enabled=False)
         yield Menu.SEPARATOR
 
-        for name in ("Claude Code", "Codex CLI", "Gemini CLI"):
+        for name in ("Claude Code", "Codex CLI"):
             info = self.data.get(name, {})
             sym  = "●" if info.get("installed") else "○"
             yield Item(f"{sym}  {name}", None, enabled=False)

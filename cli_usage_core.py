@@ -4,9 +4,7 @@ Works on Linux, macOS, and Windows. Used by both the GTK and pystray frontends.
 """
 
 import json
-import os
 import shutil
-import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -17,13 +15,13 @@ BAR_WIDTH   = 12
 NET_TIMEOUT = 6
 NET_RETRIES = 3
 NET_BACKOFF = 0.6
-# Cap how long a single call will block on a retry. The usage endpoints can
-# return a Retry-After of thousands of seconds when rate-limited; sleeping that
-# long would freeze the whole refresh thread (and every provider it fetches in
-# sequence), so we bail out and let the next scheduled refresh try again.
+# A rate-limited usage endpoint can return a Retry-After of thousands of
+# seconds; sleeping that long would freeze the single refresh thread (and every
+# provider it fetches in sequence). Cap the retry wait and let the next
+# scheduled refresh try again instead.
 NET_MAX_RETRY_DELAY = 15
-# Usage endpoints are rate-limited, so re-fetch them at most this often even
-# though the tray menu refreshes more frequently (see _cached_usage).
+# These endpoints are rate-limited, so fetch them at most once per this many
+# seconds even though the tray refreshes more often (see _cached_usage).
 USAGE_TTL = 300
 
 
@@ -84,50 +82,6 @@ def _limit_row(label, used_pct, reset_when, kind, label_w=14):
     return f"  {_status_icon(remaining)} {label:<{label_w}} {bar}{tail}"
 
 
-def _claude_limit_label(entry):
-    """Label + reset-kind for one entry of Anthropic's limits[] array.
-
-    Per-model entries carry scope.model.display_name (e.g. "Fable"); others are
-    identified by kind ("session" = 5h, "weekly_all" = the overall weekly cap).
-    """
-    scope = entry.get("scope") or {}
-    model = scope.get("model") or {} if isinstance(scope, dict) else {}
-    name  = model.get("display_name")
-    if name:
-        return f"Weekly {name}", "week"
-    kind = entry.get("kind") or ""
-    group = entry.get("group") or ""
-    if kind == "session" or group == "session":
-        return "5h limit", "5h"
-    if kind == "weekly_all":
-        return "Weekly limit", "week"
-    # Generic fallback for any future kind so it still renders something sane.
-    label = (group or kind or "Limit").replace("_", " ").title()
-    return label, ("5h" if "session" in (group or kind) else "week")
-
-
-def _codex_window_label(window, default_label, default_kind):
-    """Derive a Codex window's label from its actual duration.
-
-    OpenAI stopped guaranteeing that primary_window == 5h; a Plus account can
-    return the weekly window as the primary. Read limit_window_seconds and label
-    by duration. Falls back to the given defaults when the field is absent so
-    older payload shapes are unaffected.
-    """
-    secs = (window or {}).get("limit_window_seconds")
-    try:
-        secs = int(secs)
-    except (TypeError, ValueError):
-        return default_label, default_kind
-    if secs <= 0:
-        return default_label, default_kind
-    if secs <= 24 * 3600:
-        hours = max(1, round(secs / 3600))
-        return f"{hours}h limit", "5h"
-    days = max(1, round(secs / 86400))
-    return ("Weekly limit" if days == 7 else f"{days}d limit"), "week"
-
-
 class ProviderResponseError(ValueError):
     """Raised when a provider returns JSON in an unexpected shape."""
 
@@ -174,11 +128,14 @@ def _http_json(url, headers, timeout=NET_TIMEOUT, retries=NET_RETRIES, backoff=N
             last_exc = exc
             retry_after = exc.headers.get("Retry-After") if exc.headers else None
             should_retry = exc.code == 429 or 500 <= exc.code < 600
+            try:
+                exc.close()
+            except Exception:
+                pass
             if not should_retry or attempt == retries - 1:
                 raise
             delay = float(retry_after) if retry_after and retry_after.isdigit() else backoff * (2 ** attempt)
-            # Don't block the refresh thread for minutes on a long Retry-After;
-            # give up now and let the next scheduled refresh retry.
+            # Don't block the refresh thread for minutes on a long Retry-After.
             if delay > NET_MAX_RETRY_DELAY:
                 raise
             time.sleep(delay)
@@ -190,16 +147,21 @@ def _http_json(url, headers, timeout=NET_TIMEOUT, retries=NET_RETRIES, backoff=N
     raise last_exc
 
 
+def _remaining(used_pct):
+    """Remaining percent from a used percent, or None if unknown."""
+    return None if used_pct is None else 100 - float(used_pct)
+
+
 _USAGE_CACHE = {}  # provider name -> (monotonic_ts, validated_data)
 
 
 def _cached_usage(name, fetch_fn, ttl=USAGE_TTL):
     """Fetch provider usage through a small TTL cache.
 
-    Returns (data, age_seconds, served_on_error). The menu refreshes every ~60s
-    but these endpoints are rate-limited, so we hit the network at most once per
-    `ttl`. If a refresh fails (e.g. HTTP 429) we keep serving the last good
-    payload instead of blanking the display; served_on_error flags that case.
+    Returns (data, age_seconds, served_on_error). The tray refreshes every ~60s
+    but these endpoints are rate-limited, so hit the network at most once per
+    `ttl`. If a refresh fails (e.g. HTTP 429) keep serving the last good payload
+    instead of blanking the display; served_on_error flags that fallback.
     """
     now = time.monotonic()
     cached = _USAGE_CACHE.get(name)
@@ -226,18 +188,32 @@ def _fmt_age(seconds):
     return f"{m // 60}h"
 
 
-def _usage_error_row(exc, relogin_hint):
-    """Turn a usage-fetch failure into an actionable menu message.
+def _codex_window_label(window, fallback="Limit", fallback_kind="week"):
+    """Label + reset-kind for a Codex rate-limit window from its duration.
 
-    401 = the token expired; 403 = the token lacks the needed scope. Both are
-    fixed by re-authenticating, so surface that instead of a cryptic HTTPError.
+    Codex no longer guarantees primary_window is the 5h window and secondary
+    the weekly one — on some plans primary_window IS the weekly window. Derive
+    the label from limit_window_seconds instead of the slot position.
     """
-    code = getattr(exc, "code", None)
-    if code == 401:
-        return f"  ⚪ usage unavailable — token expired ({relogin_hint})"
-    if code == 403:
-        return f"  ⚪ usage unavailable — re-login needed ({relogin_hint})"
-    return f"  usage unavailable ({type(exc).__name__})"
+    secs = window.get("limit_window_seconds")
+    if not secs:
+        return fallback, fallback_kind
+    hours = secs / 3600
+    if hours <= 6:
+        return f"{int(round(hours))}h limit", "5h"
+    days = secs / 86400
+    if abs(days - 7) < 0.5:
+        return "Weekly limit", "week"
+    return f"{int(round(days))}d limit", "week"
+
+
+def _usage_error_rows(exc, relogin_hint):
+    """Menu rows for a failed usage fetch. 401 gets an explicit re-login hint."""
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code == 401:
+            return [(f"  ⚠ re-login required (run: {relogin_hint})", False, None)]
+        return [(f"  usage unavailable (HTTP {exc.code})", False, None)]
+    return [(f"  usage unavailable ({type(exc).__name__})", False, None)]
 
 
 def validate_claude_usage(data):
@@ -245,8 +221,7 @@ def validate_claude_usage(data):
     for key in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
         window = _as_optional_dict(data.get(key), key)
         _as_optional_number(window.get("utilization"), f"{key}.utilization")
-    # Newer payloads move per-model limits into a generic limits[] array; each
-    # entry carries a percent and optional scope.model.display_name.
+    # Per-model barometers (Fable, etc.) now live in the limits[] array.
     for i, lim in enumerate(_as_optional_list(data.get("limits"), "limits")):
         lim = _as_dict(lim, f"limits[{i}]")
         _as_optional_number(lim.get("percent"), f"limits[{i}].percent")
@@ -275,8 +250,9 @@ def validate_codex_usage(data):
 
 def claude_data():
     rows = []
+    summary = {"5h": None, "weekly": None}
     if not shutil.which("claude"):
-        return {"installed": False, "rows": [("  not installed", False, None)]}
+        return {"installed": False, "rows": [("  not installed", False, None)], "summary": summary}
 
     dot = Path.home() / ".claude.json"
     email, billing = "", ""
@@ -319,50 +295,56 @@ def claude_data():
                 },
             )))
         except Exception as e:
-            rows.append((_usage_error_row(e, "run: claude → /login"), False, None))
-            return {"installed": True, "rows": rows}
+            rows.extend(_usage_error_rows(e, "claude /login"))
+            return {"installed": True, "rows": rows, "summary": summary}
 
         if stale:
             rows.append((f"  ⚪ usage {_fmt_age(age)} old — refresh failed", False, None))
 
-        limits = u.get("limits") or []
-        if limits:
-            # Newer payload: render every entry from the generic limits[] array,
-            # so per-model caps (Opus/Sonnet/Fable/…) appear automatically.
-            for entry in limits:
-                pct = entry.get("percent")
-                if pct is None:
-                    continue
-                label, kind = _claude_limit_label(entry)
-                rows.append((_limit_row(label, pct, entry.get("resets_at"), kind), False, None))
-        else:
-            # Fallback for the older payload shape (pre-limits[]).
-            for label, key, kind in [
-                ("5h limit",      "five_hour",        "5h"),
-                ("Weekly limit",  "seven_day",        "week"),
-                ("Weekly Opus",   "seven_day_opus",   "week"),
-                ("Weekly Sonnet", "seven_day_sonnet", "week"),
-            ]:
-                w = u.get(key) or {}
-                if w.get("utilization") is not None:
-                    rows.append((_limit_row(label, w.get("utilization"),
-                                            w.get("resets_at"), kind), False, None))
+        for label, key, kind, slot in [
+            ("5h limit",     "five_hour", "5h",   "5h"),
+            ("Weekly limit", "seven_day", "week", "weekly"),
+        ]:
+            w = u.get(key) or {}
+            if w.get("utilization") is not None:
+                summary[slot] = _remaining(w.get("utilization"))
+                rows.append((_limit_row(label, w.get("utilization"),
+                                        w.get("resets_at"), kind), False, None))
+
+        # Per-model weekly barometers (Fable, Opus, Sonnet, …). Anthropic moved
+        # these out of the dedicated seven_day_* fields into a generic limits[]
+        # array keyed by scope.model.display_name, so this picks up new models
+        # automatically.
+        for lim in u.get("limits") or []:
+            model = (lim.get("scope") or {}).get("model") or {}
+            name  = model.get("display_name")
+            if not name or lim.get("percent") is None:
+                continue
+            is_session = lim.get("group") == "session"
+            label = f"{name} 5h" if is_session else f"Weekly {name}"
+            rows.append((_limit_row(label, lim["percent"], lim.get("resets_at"),
+                                    "5h" if is_session else "week"), False, None))
 
         eu = u.get("extra_usage") or {}
         if eu.get("is_enabled") and eu.get("utilization") is not None:
             rows.append((_limit_row("Extra usage", eu["utilization"], None, "week"), False, None))
 
-    return {"installed": True, "rows": rows}
+    return {"installed": True, "rows": rows, "summary": summary}
 
 
 # ── Codex CLI ────────────────────────────────────────────────────────────────
 
 def codex_data():
     rows = []
-    if not shutil.which("codex"):
-        return {"installed": False, "rows": [("  not installed", False, None)]}
-
+    summary = {"5h": None, "weekly": None}
     auth_file = Path.home() / ".codex" / "auth.json"
+    # `codex` is often installed via nvm, whose bin dir is absent from a
+    # systemd user service's PATH — so shutil.which() alone falsely reports
+    # "not installed". The presence of ~/.codex/auth.json is an equally valid
+    # signal (and it's what the usage fetch actually reads), so accept either.
+    if not shutil.which("codex") and not auth_file.exists():
+        return {"installed": False, "rows": [("  not installed", False, None)], "summary": summary}
+
     tok = None
     if auth_file.exists():
         try:
@@ -374,7 +356,7 @@ def codex_data():
 
     if not tok:
         rows.append(("  no auth token", False, None))
-        return {"installed": True, "rows": rows}
+        return {"installed": True, "rows": rows, "summary": summary}
 
     try:
         u, age, stale = _cached_usage("codex", lambda: validate_codex_usage(_http_json(
@@ -386,8 +368,8 @@ def codex_data():
             },
         )))
     except Exception as e:
-        rows.append((_usage_error_row(e, "run: codex login"), False, None))
-        return {"installed": True, "rows": rows}
+        rows.extend(_usage_error_rows(e, "codex login"))
+        return {"installed": True, "rows": rows, "summary": summary}
 
     email = u.get("email", "")
     plan  = (u.get("plan_type") or "").title()
@@ -396,194 +378,40 @@ def codex_data():
         rows.append((f"  ⚪ usage {_fmt_age(age)} old — refresh failed", False, None))
 
     rl = u.get("rate_limit") or {}
-    pw = rl.get("primary_window") or {}
-    sw = rl.get("secondary_window") or {}
-    if pw:
-        lbl, kind = _codex_window_label(pw, "5h limit", "5h")
-        rows.append((_limit_row(lbl, pw.get("used_percent"),
-                                pw.get("reset_at"), kind), False, None))
-    if sw:
-        lbl, kind = _codex_window_label(sw, "Weekly limit", "week")
-        rows.append((_limit_row(lbl, sw.get("used_percent"),
-                                sw.get("reset_at"), kind), False, None))
+    for slot, fallback in (("primary_window", ("5h limit", "5h")),
+                           ("secondary_window", ("Weekly limit", "week"))):
+        w = rl.get(slot) or {}
+        if w and w.get("used_percent") is not None:
+            label, kind = _codex_window_label(w, *fallback)
+            summary["5h" if kind == "5h" else "weekly"] = _remaining(w.get("used_percent"))
+            rows.append((_limit_row(label, w.get("used_percent"),
+                                    w.get("reset_at"), kind), False, None))
 
-    additional = u.get("additional_rate_limits") or []
-    for extra in additional:
+    for extra in (u.get("additional_rate_limits") or []):
         name = extra.get("limit_name") or extra.get("metered_feature") or "Extra"
         erl  = extra.get("rate_limit") or {}
         epw  = erl.get("primary_window") or {}
         esw  = erl.get("secondary_window") or {}
         rows.append((f"  {name} limit:", False, None))
         if epw:
-            lbl, kind = _codex_window_label(epw, "5h limit", "5h")
-            rows.append((_limit_row("  " + lbl, epw.get("used_percent"),
-                                    epw.get("reset_at"), kind), False, None))
+            rows.append((_limit_row("  5h", epw.get("used_percent"),
+                                    epw.get("reset_at"), "5h"), False, None))
         if esw:
-            lbl, kind = _codex_window_label(esw, "Weekly limit", "week")
-            rows.append((_limit_row("  " + lbl, esw.get("used_percent"),
-                                    esw.get("reset_at"), kind), False, None))
+            rows.append((_limit_row("  Weekly", esw.get("used_percent"),
+                                    esw.get("reset_at"), "week"), False, None))
 
     cr = u.get("credits") or {}
     if cr.get("has_credits") or cr.get("unlimited"):
         bal = cr.get("balance", "")
         rows.append((_kv("Credits", "unlimited" if cr.get("unlimited") else f"${bal}"), False, None))
 
-    # Some plan tiers (e.g. "prolite") return all rate-limit fields as null.
-    # Without this branch the menu would just show Account/Plan and look broken.
-    # Surface anything else the API gave us so the user knows it's the plan, not the tray.
-    has_any_limit = bool(pw or sw or additional or cr.get("has_credits") or cr.get("unlimited"))
-    if not has_any_limit:
-        spend         = u.get("spend_control") or {}
-        reset_credits = u.get("rate_limit_reset_credits") or {}
-        spend_cap     = spend.get("individual_limit")
-        reset_avail   = reset_credits.get("available_count")
-        if spend.get("reached"):
-            rows.append(("  🔴 spend limit reached", False, None))
-        if spend_cap:
-            rows.append((_kv("Spend cap", f"${spend_cap}"), False, None))
-        if reset_avail:
-            rows.append((_kv("Reset credits", str(reset_avail)), False, None))
-
-    # Always try to add real consumption numbers from ccusage-codex if installed.
-    # Offline mode (-O) avoids the LiteLLM pricing fetch — keeps the call ~80ms.
-    rows.extend(_ccusage_codex_rows())
-
-    if not has_any_limit and len(rows) == 1:
-        # Account row only — nothing else surfaced
-        plan_label = plan or "unknown"
-        rows.append((f"  no usage data available (plan: {plan_label}, ccusage-codex not installed)", False, None))
-
-    return {"installed": True, "rows": rows}
-
-
-def _ccusage_codex_rows():
-    """Shell out to `ccusage-codex --json -O` and produce 1-2 rows of consumption data.
-
-    Returns [] silently if the tool isn't installed, never raises.
-    OpenAI's `/usage` endpoint returns null for prolite plan; this is the only
-    way to actually show numbers for that plan.
-    """
-    rows = []
-    exe = shutil.which("ccusage-codex")
-    if not exe:
-        return rows
-    try:
-        # Monthly first (covers the current billing cycle), then today's slice
-        m = _run_json_cli([exe, "monthly", "--json", "-O"])
-        totals = (m or {}).get("totals") or {}
-        if totals.get("totalTokens"):
-            month_label = "This month"
-            months = (m or {}).get("monthly") or []
-            if months:
-                month_label = months[-1].get("month", month_label)
-            rows.append((_kv(month_label, f"{_fmt_n(totals['totalTokens'])} tok · ${totals.get('costUSD', 0):.2f}"), False, None))
-
-        d = _run_json_cli([exe, "daily", "--json", "-O"])
-        days = (d or {}).get("daily") or []
-        if days:
-            today = days[-1]
-            rows.append((_kv("  Latest day", f"{_fmt_n(today['totalTokens'])} tok · ${today.get('costUSD', 0):.2f} · {today.get('date','')}"), False, None))
-    except Exception:
-        # Swallow — the bare-bones API rows are still shown above
-        pass
-    return rows
-
-
-def _run_json_cli(cmd, timeout=10):
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    if p.returncode != 0:
-        return None
-    out = p.stdout.strip()
-    # Some CLIs prepend log lines before the JSON object — find the first '{'
-    idx = out.find("{")
-    if idx == -1:
-        return None
-    return json.loads(out[idx:])
-
-
-def _fmt_n(n):
-    """Compact numeric format: 1234 → 1.2K, 12345678 → 12.3M."""
-    try:
-        n = int(n)
-    except (TypeError, ValueError):
-        return str(n)
-    for unit, div in (("M", 1_000_000), ("K", 1_000)):
-        if n >= div:
-            return f"{n/div:.1f}{unit}"
-    return str(n)
-
-
-# ── Gemini CLI ───────────────────────────────────────────────────────────────
-
-def gemini_data():
-    rows = []
-    if not shutil.which("gemini"):
-        return {"installed": False, "rows": [("  not installed", False, None)]}
-
-    # Gemini has no public usage endpoint, so we surface the richest local state we can:
-    # account email, auth type, and OAuth token expiry. Beats a bare "usage unavailable".
-    env_key  = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    auth_kind = None
-    email     = None
-    expiry    = None
-
-    if env_key:
-        auth_kind = "API key (env)"
-    else:
-        gem_dir   = Path.home() / ".gemini"
-        oauth     = gem_dir / "oauth_creds.json"
-        accounts  = gem_dir / "google_accounts.json"
-        if oauth.exists():
-            auth_kind = "OAuth (gemini-cli)"
-            try:
-                d  = json.loads(oauth.read_text())
-                ms = d.get("expiry_date")
-                if ms:
-                    expiry = datetime.fromtimestamp(ms / 1000).astimezone()
-            except Exception:
-                pass
-            if accounts.exists():
-                try:
-                    email = json.loads(accounts.read_text()).get("active")
-                except Exception:
-                    pass
-        else:
-            for p in [
-                Path.home() / ".config" / "gemini" / "credentials.json",
-                Path.home() / ".config" / "gcloud" / "application_default_credentials.json",
-                Path.home() / "AppData" / "Roaming" / "gcloud" / "application_default_credentials.json",
-                Path.home() / "Library" / "Application Support" / "gcloud" / "application_default_credentials.json",
-            ]:
-                if p.exists():
-                    auth_kind = p.name
-                    break
-
-    if not auth_kind:
-        rows.append(("  no credentials found", False, None))
-        return {"installed": True, "rows": rows}
-
-    if email:
-        rows.append((_kv("Account", email), False, None))
-    rows.append((_kv("Auth", auth_kind), False, None))
-    if expiry:
-        now = datetime.now().astimezone()
-        if expiry < now:
-            rows.append((_kv("Token", "expired (auto-refreshes on next call)"), False, None))
-        else:
-            rows.append((_kv("Token", f"expires {expiry.strftime('%H:%M on %d %b').lstrip('0')}"), False, None))
-    # No public usage endpoint for the OAuth-personal flow Google ships with the
-    # Gemini CLI; the only way to see quotas is the API-key flow with a Google
-    # Cloud project. Tell the user that explicitly so the section doesn't look broken.
-    if auth_kind != "API key (env)":
-        rows.append(("  no usage numbers — Google doesn't expose them for OAuth-personal", False, None))
-    return {"installed": True, "rows": rows}
+    return {"installed": True, "rows": rows, "summary": summary}
 
 
 def fetch_all():
     return {
         "Claude Code": claude_data(),
         "Codex CLI":   codex_data(),
-        "Gemini CLI":  gemini_data(),
     }
 
 

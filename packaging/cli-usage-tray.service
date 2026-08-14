@@ -1,0 +1,23 @@
+[Unit]
+Description=CLI-Usage tray indicator (Claude Code + Codex usage)
+# Run inside the graphical session so DISPLAY/XAUTHORITY are available and
+# the unit stops cleanly on logout.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+# Type=notify + WatchdogSec: the app sends READY=1 once up and a WATCHDOG=1
+# heartbeat every refresh cycle. If the refresh loop stalls (the "frozen after
+# hours" failure) the heartbeat stops and systemd kills + restarts us — which
+# a plain Restart= cannot catch, because the process stays alive when hung.
+Type=notify
+NotifyAccess=main
+WatchdogSec=180
+ExecStart=/usr/bin/python3 /home/homan/workspace/CLI-Usage/cli_usage_gtk.py
+# Restart on crash, X11 "Broken pipe" (nonzero exit), AND watchdog timeout;
+# but NOT after a clean Quit from the tray menu (exit 0).
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target
