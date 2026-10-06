@@ -126,10 +126,20 @@ python3 cli_usage_xplat.py    # cross-platform frontend
 
 ### macOS
 
+Requires Xcode Command Line Tools (`xcode-select --install`), which provide `python3`, `clang` and `codesign`.
+
 ```bash
 chmod +x setup_macos.sh
 ./setup_macos.sh
 ```
+
+What it sets up:
+
+- `~/Applications/CLI Usage.app`: a small menu-bar-only app (no Dock icon) with its own identity. A bare Python script shows up as "Python", and macOS may hide that from the menu bar.
+- A LaunchAgent (`~/Library/LaunchAgents/com.user.cli-usage.plist`) that starts it at login and restarts it if it quits (`KeepAlive`). Its `PATH` includes the folders where `claude`, `codex` and `gemini` were found at install time.
+- Claude Code credentials are read from the macOS Keychain (`Claude Code-credentials`). The first time, macOS may ask to allow `security` access. Click **Always Allow**.
+
+Re-run `./setup_macos.sh` after `git pull` to rebuild the app and restart it. If the icon is missing, check **System Settings → Menu Bar → Allow in the Menu Bar** for CLI Usage.
 
 Manual run:
 
@@ -223,9 +233,9 @@ pkill -f cli_usage_xplat.py || true
 ### macOS
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.user.cli-usage.plist
+launchctl bootout gui/$(id -u)/com.user.cli-usage
 rm -f ~/Library/LaunchAgents/com.user.cli-usage.plist
-pkill -f cli_usage_xplat.py || true
+rm -rf ~/Applications/"CLI Usage.app"
 ```
 
 ### Windows

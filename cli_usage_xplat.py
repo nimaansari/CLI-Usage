@@ -73,22 +73,28 @@ def _icon_image(pct=None):
 
     d.rounded_rectangle((2, 2, size - 2, size - 2), radius=12, fill=bg)
 
-    try:
-        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 28)
-    except Exception:
+    # The menu bar shrinks this to ~22pt, so on macOS fill the square edge to edge.
+    font_size = 38 if IS_MAC else 28
+    font = None
+    for name in ("DejaVuSans-Bold.ttf", "arialbd.ttf",
+                 "/System/Library/Fonts/Supplemental/Arial Bold.ttf"):
         try:
-            font = ImageFont.truetype("arialbd.ttf", 28)
+            font = ImageFont.truetype(name, font_size)
+            break
         except Exception:
-            font = ImageFont.load_default()
+            pass
+    if font is None:
+        font = ImageFont.load_default()
 
     text = "CLI"
     bbox = d.textbbox((0, 0), text, font=font)
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    d.text(((size - w) / 2 - bbox[0], (size - h) / 2 - bbox[1] - 2), text, fill=fg, font=font)
+    text_y = 4 - bbox[1] if IS_MAC else (size - h) / 2 - bbox[1] - 2
+    d.text(((size - w) / 2 - bbox[0], text_y), text, fill=fg, font=font)
 
     if pct is not None:
         # Tiny usage bar at the bottom: full width means 100% left.
-        bar_x0, bar_y0, bar_x1, bar_y1 = 12, 52, 52, 58
+        bar_x0, bar_y0, bar_x1, bar_y1 = (4, 46, 60, 58) if IS_MAC else (12, 52, 52, 58)
         d.rounded_rectangle((bar_x0, bar_y0, bar_x1, bar_y1), radius=3, fill=(255, 255, 255, 80) if not IS_MAC else (0, 0, 0, 45))
         fill_w = int((bar_x1 - bar_x0) * max(0, min(100, pct)) / 100)
         if fill_w > 0:
@@ -126,6 +132,11 @@ def open_terminal(cmd):
 
 # ── tray ────────────────────────────────────────────────────────────────────
 
+def _terminal_action(cmd):
+    # pystray rejects callbacks with more than two parameters (even defaulted ones).
+    return lambda _icon, _item: open_terminal(cmd)
+
+
 class XPlatTray:
     def __init__(self):
         self.data    = {}
@@ -136,6 +147,22 @@ class XPlatTray:
             menu=Menu(self._menu_items),
         )
         self._stop   = threading.Event()
+        if IS_MAC:
+            self._use_template_image()
+
+    def _use_template_image(self):
+        # The macOS icon is black-on-transparent, invisible on a dark menu bar.
+        # Marking the NSImage as a template lets AppKit tint it for light/dark.
+        icon = self.icon
+        orig = icon._assert_image
+
+        def assert_image():
+            orig()
+            if icon._icon_image is not None and not icon._icon_image.isTemplate():
+                icon._icon_image.setTemplate_(True)
+                icon._status_item.button().setImage_(icon._icon_image)
+
+        icon._assert_image = assert_image
 
     # pystray calls this lazily each time the menu opens.
     def _menu_items(self):
@@ -151,7 +178,7 @@ class XPlatTray:
                 yield Item(text, None, enabled=False)
             if info.get("installed"):
                 cmd = TOOL_CMDS[name]
-                yield Item("    Open terminal…", lambda _i, _it, c=cmd: open_terminal(c))
+                yield Item("    Open terminal…", _terminal_action(cmd))
             yield Menu.SEPARATOR
 
         yield Item("Refresh", lambda _i, _it: self.refresh_now())
@@ -166,13 +193,21 @@ class XPlatTray:
         except Exception as e:
             self.data = {"_error": str(e)}
         worst = worst_remaining_pct(self.data)
+        # AppKit aborts (SIGTRAP) if status-item UI is touched off the main thread.
+        if IS_MAC:
+            from PyObjCTools import AppHelper
+            AppHelper.callAfter(self._apply_ui, worst)
+        else:
+            self._apply_ui(worst)
+
+    def _apply_ui(self, worst):
         self.icon.title = f"cli-usage — {worst}% left" if worst is not None else "cli-usage"
         self.icon.icon = _icon_image(worst)
         # Force menu redraw so the lazy items reflect new data.
         try:
             self.icon.update_menu()
-        except Exception:
-            pass
+        except Exception as e:
+            print("update_menu failed:", repr(e), flush=True)
 
     def _refresh_loop(self):
         while not self._stop.is_set():

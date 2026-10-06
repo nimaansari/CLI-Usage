@@ -11,10 +11,15 @@ from __future__ import annotations
 
 import argparse
 import os
+try:
+    import pwd
+except ImportError:  # Windows
+    pwd = None
 import platform
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 APP_NAME = "cli-usage"
@@ -167,21 +172,114 @@ X-GNOME-Autostart-enabled=true
     return desktop
 
 
-def install_macos_autostart(script: Path, python_bin: Path, *, dry_run: bool) -> Path:
+MACOS_LABEL = "com.user.cli-usage"
+MACOS_APP = Path("~/Applications/CLI Usage.app")
+MACOS_BUNDLE_ID = "ca.agiam.cli-usage"
+
+LAUNCHER_C = r"""#include <Python.h>
+#include <stdlib.h>
+int main(int argc, char **argv) {
+    setenv("PYTHONPATH", "%(pythonpath)s", 1);
+    char *args[] = { argv[0], "%(script)s", NULL };
+    return Py_BytesMain(2, args);
+}
+"""
+
+INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>CLI Usage</string>
+  <key>CFBundleDisplayName</key><string>CLI Usage</string>
+  <key>CFBundleIdentifier</key><string>%s</string>
+  <key>CFBundleExecutable</key><string>cli-usage</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>1.0</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>LSUIElement</key><true/>
+</dict></plist>
+""" % MACOS_BUNDLE_ID
+
+
+def build_macos_app(script: Path, python_bin: Path, *, dry_run: bool) -> Path | None:
+    """Wrap the tray in "CLI Usage.app" so macOS gives it its own menu-bar identity.
+
+    Run as a bare script, the process is just "Python" (com.apple.python3), which
+    macOS may hide from the menu bar. The bundle's executable is a tiny C launcher
+    that embeds the venv's framework Python and runs the tray script.
+    Returns the launcher path, or None to fall back to python + script.
+    """
+    if not command_exists("clang") or not command_exists("codesign"):
+        log("clang/codesign not found (install Xcode Command Line Tools); skipping CLI Usage.app")
+        return None
+    probe = subprocess.run(
+        [str(python_bin), "-c",
+         "import sys, sysconfig, site; print(sys.base_prefix); "
+         "print(sysconfig.get_paths()['include']); print(site.getsitepackages()[0])"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode != 0:
+        log(f"Could not inspect {python_bin}; skipping CLI Usage.app")
+        return None
+    base_prefix, include, site_packages = probe.stdout.split("\n")[:3]
+    # Framework builds live at .../<Name>.framework/Versions/<X.Y>
+    fw_dir = Path(base_prefix).parent.parent
+    if fw_dir.suffix != ".framework":
+        log(f"{python_bin} is not a framework Python; skipping CLI Usage.app")
+        return None
+
+    app = MACOS_APP.expanduser()
+    exe = app / "Contents" / "MacOS" / "cli-usage"
+    log(f"Building macOS app bundle: {app}")
+    if dry_run:
+        return exe
+    (app / "Contents" / "MacOS").mkdir(parents=True, exist_ok=True)
+    (app / "Contents" / "Info.plist").write_text(INFO_PLIST)
+    src = app / "Contents" / "Resources" / "launcher.c"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text(LAUNCHER_C % {"pythonpath": f"{site_packages}:{script.parent}", "script": str(script)})
+    run(["clang", "-O2", "-o", str(exe), str(src), f"-I{include}",
+         f"-F{fw_dir.parent}", "-framework", fw_dir.stem, f"-Wl,-rpath,{fw_dir.parent}"])
+    run(["codesign", "--force", "-s", "-", str(app)])
+    return exe
+
+
+def macos_path_env() -> str:
+    """PATH for the LaunchAgent: launchd's default lacks ~/.local/bin and Homebrew,
+    so claude/codex/gemini would show as "not installed"."""
+    dirs = []
+    for tool in ("claude", "codex", "gemini", "ccusage-codex"):
+        found = shutil.which(tool)
+        if found:
+            dirs.append(str(Path(found).parent))
+    dirs += [str(Path.home() / ".local" / "bin"), "/opt/homebrew/bin", "/usr/local/bin",
+             "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    return ":".join(dict.fromkeys(dirs))
+
+
+def install_macos_autostart(script: Path, python_bin: Path, *, dry_run: bool,
+                            program: Path | None = None) -> Path:
     plist_dir = Path.home() / "Library" / "LaunchAgents"
-    plist = plist_dir / "com.user.cli-usage.plist"
+    plist = plist_dir / f"{MACOS_LABEL}.plist"
+    args = [program] if program else [python_bin, script]
+    args_xml = "\n".join(f"        <string>{a}</string>" for a in args)
     content = f"""<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
 <plist version=\"1.0\">
 <dict>
-    <key>Label</key><string>com.user.cli-usage</string>
+    <key>Label</key><string>{MACOS_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{python_bin}</string>
-        <string>{script}</string>
+{args_xml}
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key><string>{macos_path_env()}</string>
+    </dict>
     <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><false/>
+    <key>KeepAlive</key><true/>
+    <key>ThrottleInterval</key><integer>30</integer>
+    <key>ProcessType</key><string>Interactive</string>
+    <key>LimitLoadToSessionType</key><string>Aqua</string>
     <key>StandardOutPath</key><string>{LOG_PATH}</string>
     <key>StandardErrorPath</key><string>{LOG_PATH}</string>
 </dict>
@@ -195,9 +293,24 @@ def install_macos_autostart(script: Path, python_bin: Path, *, dry_run: bool) ->
             run(["launchctl", "unload", str(old)], check=False)
             old.unlink()
         plist.write_text(content)
-        if sys.platform == "darwin" and command_exists("launchctl"):
-            run(["launchctl", "unload", str(plist)], check=False)
-            run(["launchctl", "load", str(plist)], check=False)
+        # Only (re)load the real user's agent; tests point HOME at a temp dir and
+        # must not replace the live job that shares this label.
+        real_home = Path(pwd.getpwuid(os.getuid()).pw_dir) if hasattr(os, "getuid") else None
+        if sys.platform == "darwin" and command_exists("launchctl") and Path.home() == real_home:
+            domain = f"gui/{os.getuid()}"
+            run(["launchctl", "bootout", f"{domain}/{MACOS_LABEL}"], check=False)
+            # bootout is asynchronous; bootstrapping before the old job is gone fails with EIO.
+            for _ in range(20):
+                gone = subprocess.run(["launchctl", "print", f"{domain}/{MACOS_LABEL}"],
+                                      capture_output=True).returncode != 0
+                if gone:
+                    break
+                time.sleep(0.5)
+            for attempt in range(3):
+                result = run(["launchctl", "bootstrap", domain, str(plist)], check=False)
+                if result is None or result.returncode == 0:
+                    break
+                time.sleep(2)
     return plist
 
 
@@ -265,9 +378,14 @@ def main(argv: list[str] | None = None) -> int:
 
     entry = None
     if not args.no_autostart:
-        entry = install_autostart(script, python_bin, dry_run=args.dry_run)
+        if sys.platform == "darwin" and frontend == "xplat":
+            program = build_macos_app(script, python_bin, dry_run=args.dry_run)
+            entry = install_macos_autostart(script, python_bin, dry_run=args.dry_run, program=program)
+        else:
+            entry = install_autostart(script, python_bin, dry_run=args.dry_run)
 
-    if not args.no_launch:
+    # On macOS the LaunchAgent (RunAtLoad) already started it; launching again would duplicate it.
+    if not args.no_launch and not (sys.platform == "darwin" and entry):
         launch_app(script, python_bin, dry_run=args.dry_run)
 
     log("")
