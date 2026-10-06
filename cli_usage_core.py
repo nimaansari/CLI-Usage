@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -180,9 +181,26 @@ def claude_data():
 
     creds = Path.home() / ".claude" / ".credentials.json"
     tok, sub_type, tier = None, "", ""
+    raw = None
     if creds.exists():
         try:
-            c = json.loads(creds.read_text())
+            raw = creds.read_text()
+        except Exception:
+            pass
+    elif sys.platform == "darwin":
+        # On macOS Claude Code stores its OAuth credentials in the login Keychain.
+        try:
+            p = subprocess.run(
+                ["/usr/bin/security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if p.returncode == 0:
+                raw = p.stdout.strip()
+        except Exception:
+            pass
+    if raw:
+        try:
+            c = json.loads(raw)
             o = c.get("claudeAiOauth", {})
             tok      = o.get("accessToken")
             sub_type = o.get("subscriptionType", "")
@@ -252,7 +270,8 @@ def codex_data():
 
     try:
         u = validate_codex_usage(_http_json(
-            "https://chatgpt.com/backend-api/codex/usage",
+            # /codex/usage now returns a Cloudflare 403; Codex CLI uses /wham/usage.
+            "https://chatgpt.com/backend-api/wham/usage",
             {
                 "Authorization": f"Bearer {tok}",
                 "User-Agent": "codex_cli_rs/ai-tray",
@@ -271,11 +290,13 @@ def codex_data():
     pw = rl.get("primary_window") or {}
     sw = rl.get("secondary_window") or {}
     if pw:
-        rows.append((_limit_row("5h limit", pw.get("used_percent"),
-                                pw.get("reset_at"), "5h"), False, None))
+        label, kind = _codex_window(pw, "5h")
+        rows.append((_limit_row(f"{label} limit", pw.get("used_percent"),
+                                pw.get("reset_at"), kind), False, None))
     if sw:
-        rows.append((_limit_row("Weekly limit", sw.get("used_percent"),
-                                sw.get("reset_at"), "week"), False, None))
+        label, kind = _codex_window(sw, "week")
+        rows.append((_limit_row(f"{label} limit", sw.get("used_percent"),
+                                sw.get("reset_at"), kind), False, None))
 
     additional = u.get("additional_rate_limits") or []
     for extra in additional:
@@ -285,11 +306,13 @@ def codex_data():
         esw  = erl.get("secondary_window") or {}
         rows.append((f"  {name} limit:", False, None))
         if epw:
-            rows.append((_limit_row("  5h", epw.get("used_percent"),
-                                    epw.get("reset_at"), "5h"), False, None))
+            label, kind = _codex_window(epw, "5h")
+            rows.append((_limit_row(f"  {label}", epw.get("used_percent"),
+                                    epw.get("reset_at"), kind), False, None))
         if esw:
-            rows.append((_limit_row("  Weekly", esw.get("used_percent"),
-                                    esw.get("reset_at"), "week"), False, None))
+            label, kind = _codex_window(esw, "week")
+            rows.append((_limit_row(f"  {label}", esw.get("used_percent"),
+                                    esw.get("reset_at"), kind), False, None))
 
     cr = u.get("credits") or {}
     if cr.get("has_credits") or cr.get("unlimited"):
@@ -322,6 +345,16 @@ def codex_data():
         rows.append((f"  no usage data available (plan: {plan_label}, ccusage-codex not installed)", False, None))
 
     return {"installed": True, "rows": rows}
+
+
+def _codex_window(window, default_kind):
+    """Label a Codex window by its real length (plans differ: 5h vs weekly primary)."""
+    secs = window.get("limit_window_seconds")
+    if not isinstance(secs, (int, float)):
+        return ("5h" if default_kind == "5h" else "Weekly"), default_kind
+    if secs >= 86400:
+        return ("Weekly" if secs >= 6 * 86400 else f"{round(secs / 86400)}d"), "week"
+    return f"{round(secs / 3600)}h", "5h"
 
 
 def _ccusage_codex_rows():

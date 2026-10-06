@@ -42,8 +42,8 @@
 
 | CLI | Status | What shows |
 | --- | --- | --- |
-| **Claude Code** | Supported | Account, tier, 5h limit, weekly limits, model-specific weekly limits when available |
-| **Codex CLI** | Supported | Account, plan, 5h limit, weekly limit, additional limits, credits when available |
+| **Claude Code** | Supported | Account, tier, 5h limit, weekly limits, model-specific weekly limits when available. On macOS the login is read from the Keychain. |
+| **Codex CLI** | Supported | Account, plan, rate-limit windows labelled by their real length (5h or weekly, depending on plan), additional limits, credits when available |
 | **Gemini CLI** | Partial | Credential/auth detection. Live usage is not shown because there is no stable public usage endpoint wired in. |
 
 ## Cool bits
@@ -55,7 +55,8 @@
   - 🟢 green = healthy
   - 🟡 yellow = under 30% left
   - 🔴 red = under 10% left
-- Cross-platform tray icon changes color when usage gets low
+- Cross-platform tray icon changes color when usage gets low (on macOS it is a monochrome template icon that follows light/dark mode, with a usage bar under "CLI")
+- macOS installer builds a real menu-bar app (`~/Applications/CLI Usage.app`) that starts at login and restarts itself if it quits
 - Menu rows include colored status icons beside each limit
 - Linux GTK menus use real colored text via Pango markup
 - GTK frontend switches to warning/error-style system icons when usage gets low
@@ -126,10 +127,20 @@ python3 cli_usage_xplat.py    # cross-platform frontend
 
 ### macOS
 
+Requires Xcode Command Line Tools (`xcode-select --install`), which provide `python3`, `clang` and `codesign`.
+
 ```bash
 chmod +x setup_macos.sh
 ./setup_macos.sh
 ```
+
+What it sets up:
+
+- `~/Applications/CLI Usage.app`: a small menu-bar-only app (no Dock icon) with its own identity. A bare Python script shows up as "Python", and macOS may hide that from the menu bar.
+- A LaunchAgent (`~/Library/LaunchAgents/com.user.cli-usage.plist`) that starts it at login and restarts it if it quits (`KeepAlive`). Its `PATH` includes the folders where `claude`, `codex` and `gemini` were found at install time.
+- Claude Code credentials are read from the macOS Keychain (`Claude Code-credentials`). The first time, macOS may ask to allow `security` access. Click **Always Allow**.
+
+Re-run `./setup_macos.sh` after `git pull` to rebuild the app and restart it. If the icon is missing, check **System Settings → Menu Bar → Allow in the Menu Bar** for CLI Usage.
 
 Manual run:
 
@@ -195,8 +206,8 @@ sudo apt-get install -y \
 
 `cli_usage_core.py` contains the shared data layer. It checks whether each CLI executable exists, reads local auth/account metadata, and calls first-party usage endpoints when available:
 
-- Claude Code: Anthropic OAuth usage endpoint
-- Codex CLI: ChatGPT Codex usage endpoint
+- Claude Code: Anthropic OAuth usage endpoint (`api.anthropic.com/api/oauth/usage`). Credentials come from `~/.claude/.credentials.json`, or the macOS Keychain item `Claude Code-credentials`.
+- Codex CLI: ChatGPT usage endpoint (`chatgpt.com/backend-api/wham/usage`, the same one the Codex CLI uses). Credentials come from `~/.codex/auth.json`.
 - Gemini CLI: local credential detection only
 
 Frontends:
@@ -206,7 +217,7 @@ Frontends:
 
 ## Privacy
 
-This app reads local CLI credential files only to discover the current account and request usage data from the relevant first-party service. It does **not** store tokens, print tokens, or send them anywhere other than the official usage endpoints used by the corresponding CLI provider.
+This app reads local CLI credential files (and, on macOS, the Claude Code Keychain item via `/usr/bin/security`) only to discover the current account and request usage data from the relevant first-party service. It does **not** store tokens, print tokens, or send them anywhere other than the official usage endpoints used by the corresponding CLI provider.
 
 Still, treat this like any local tool that can read CLI auth files: review the code before running it on a machine with sensitive credentials.
 
@@ -223,9 +234,9 @@ pkill -f cli_usage_xplat.py || true
 ### macOS
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.user.cli-usage.plist
+launchctl bootout gui/$(id -u)/com.user.cli-usage
 rm -f ~/Library/LaunchAgents/com.user.cli-usage.plist
-pkill -f cli_usage_xplat.py || true
+rm -rf ~/Applications/"CLI Usage.app"
 ```
 
 ### Windows
@@ -277,6 +288,23 @@ Common causes:
 - Network access is blocked.
 - The auth file format changed in a new CLI release.
 
+### macOS: the icon does not appear
+
+- Check that it is running: `launchctl print gui/$(id -u)/com.user.cli-usage | grep -E "state|pid"`
+- Open **System Settings → Menu Bar** and make sure **CLI Usage** is allowed in the menu bar.
+- If the menu bar is crowded, the icon may be hidden behind the notch or other icons. Hold ⌘ and drag it closer to the clock.
+- Re-run `./setup_macos.sh` to rebuild the app and restart it.
+
+### macOS: Claude or Codex shows "not installed" or no login
+
+- The LaunchAgent's `PATH` is fixed at install time. If you installed a CLI later, or moved it, re-run `./setup_macos.sh`.
+- Claude Code: if macOS asks whether `security` may access **Claude Code-credentials**, click **Always Allow**. If you clicked Deny, run `claude` once, then restart the app.
+- Logs and menu errors: `tail -f /tmp/cli-usage.log`
+
+### macOS: not running after a reboot
+
+The LaunchAgent starts at login, not at boot. With FileVault on, macOS disables automatic login, so the app starts once someone logs in.
+
 ### Gemini usage is unavailable
 
 This is expected. The app currently detects Gemini auth status, but does not show live Gemini usage because there is no stable public endpoint wired into this project.
@@ -295,7 +323,8 @@ This is expected. The app currently detects Gemini auth status, but does not sho
 - [x] Cleaner unified installer with dry-run/no-launch/no-autostart modes
 - [ ] Native desktop notifications when usage is low
 - [ ] Configurable refresh interval
-- [ ] Package as a macOS app / Windows executable
+- [x] macOS menu-bar app bundle (built locally by `setup_macos.sh`)
+- [ ] Windows executable
 - [ ] Optional config file for hiding unused CLIs
 - [ ] Real screenshots from each OS
 
@@ -311,7 +340,7 @@ pyproject.toml         # project metadata
 tests/                 # unit tests
 cli_usage_gtk.py       # Linux AppIndicator UI
 cli_usage_xplat.py     # pystray cross-platform UI
-setup*.sh/ps1          # platform startup installers
+setup*.sh/ps1          # platform startup installers (setup_macos.sh also builds CLI Usage.app)
 ```
 
 ## License
