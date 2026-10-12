@@ -481,10 +481,89 @@ def install_autostart(script: Path, python_bin: Path, *, dry_run: bool) -> Path 
     return None
 
 
+SYSTEMD_UNIT = "cli-usage.service"
+
+
+def systemd_unit_path() -> Path:
+    return Path.home() / ".config" / "systemd" / "user" / SYSTEMD_UNIT
+
+
+def systemd_user_available() -> bool:
+    """True when a systemd user manager runs the graphical session (GNOME, KDE, ...)."""
+    if not sys.platform.startswith("linux") or not command_exists("systemctl") or not is_real_home():
+        return False
+    try:
+        r = subprocess.run(["systemctl", "--user", "is-active", "graphical-session.target"],
+                           capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() == "active"
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _systemd_quote(arg) -> str:
+    return '"' + str(arg).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+
+
+def install_linux_service(script: Path, python_bin: Path, *, dry_run: bool) -> Path:
+    """systemd user service: starts with the desktop session and restarts the tray
+    if it ever stops (crash, killed, session cleanup). The tray's Quit item stops
+    the service, so Quit still means quit until the next login."""
+    unit = systemd_unit_path()
+    content = f"""[Unit]
+Description=CLI Usage tray (Claude Code / Codex / Gemini limits)
+PartOf=graphical-session.target
+After=graphical-session.target
+# Never give up restarting.
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart={_systemd_quote(python_bin)} {_systemd_quote(script)}
+Environment={_systemd_quote("PATH=" + session_path_env())}
+Environment=CLI_USAGE_SERVICE=1
+WorkingDirectory={script.parent}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
+"""
+    log(f"Writing systemd user service: {unit}")
+    if dry_run:
+        return unit
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(content)
+    # The service replaces the one-shot autostart entry; keep only the app-menu launcher.
+    (Path.home() / ".config" / "autostart" / "cli-usage.desktop").unlink(missing_ok=True)
+    run(["systemctl", "--user", "daemon-reload"], check=False)
+    run(["systemctl", "--user", "enable", SYSTEMD_UNIT], check=False)
+    return unit
+
+
+def _write_linux_menu_launcher(*, dry_run: bool) -> None:
+    """App-menu entry that (re)starts the service after Quit."""
+    launcher = Path.home() / ".local" / "share" / "applications" / "cli-usage.desktop"
+    content = f"""[Desktop Entry]
+Type=Application
+Name=CLI Usage
+Comment=Tray indicator showing rate-limit usage for Claude Code, Codex CLI, and Gemini CLI
+Exec=systemctl --user restart {SYSTEMD_UNIT}
+Icon={_linux_icon(dry_run=dry_run)}
+Terminal=false
+Categories=Utility;Monitor;
+StartupNotify=false
+"""
+    if not dry_run:
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        launcher.write_text(content)
+
+
 def stop_running(*, dry_run: bool) -> None:
     """Stop an already-running tray so the freshly installed code is what runs."""
     if dry_run:
         return
+    if systemd_unit_path().exists() and command_exists("systemctl") and is_real_home():
+        # Otherwise systemd would restart the old copy as soon as it is killed.
+        subprocess.run(["systemctl", "--user", "stop", SYSTEMD_UNIT], check=False, capture_output=True)
     try:
         sys.path.insert(0, str(ROOT))
         from cli_usage_core import stop_running_instance
@@ -528,6 +607,15 @@ def uninstall(*, dry_run: bool) -> int:
         programs = _windows_programs_dir()
         paths += [programs / "Startup" / "CLI Usage.lnk", programs / "Startup" / "cli-usage.cmd",
                   programs / "CLI Usage.lnk"]
+    unit = systemd_unit_path()
+    if unit.exists():
+        if command_exists("systemctl") and is_real_home():
+            run(["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT], dry_run=dry_run, check=False)
+        log(f"Removing {unit}")
+        if not dry_run:
+            unit.unlink()
+            if command_exists("systemctl") and is_real_home():
+                subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
     if sys.platform == "darwin" and command_exists("launchctl") and is_real_home():
         run(["launchctl", "bootout", f"gui/{os.getuid()}/{MACOS_LABEL}"], dry_run=dry_run, check=False)
     for path in paths:
@@ -590,12 +678,26 @@ def main(argv: list[str] | None = None) -> int:
         if sys.platform == "darwin" and frontend == "xplat":
             program = build_macos_app(script, python_bin, dry_run=args.dry_run)
             entry = install_macos_autostart(script, python_bin, dry_run=args.dry_run, program=program)
+        elif systemd_user_available():
+            entry = install_linux_service(script, python_bin, dry_run=args.dry_run)
+            _write_linux_menu_launcher(dry_run=args.dry_run)
         else:
             entry = install_autostart(script, python_bin, dry_run=args.dry_run)
 
-    # On macOS the LaunchAgent (RunAtLoad) already started it; launching again would duplicate it.
-    if not args.no_launch and not (sys.platform == "darwin" and entry):
-        launch_app(script, python_bin, dry_run=args.dry_run)
+    if not args.no_launch:
+        if entry is not None and entry.name == SYSTEMD_UNIT:
+            log("Starting the cli-usage service...")
+            result = run(["systemctl", "--user", "restart", SYSTEMD_UNIT], dry_run=args.dry_run, check=False)
+            if result is not None and result.returncode != 0:
+                log("The service did not start; using a login autostart entry instead.")
+                subprocess.run(["systemctl", "--user", "disable", SYSTEMD_UNIT], check=False)
+                systemd_unit_path().unlink(missing_ok=True)
+                subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+                entry = install_linux_autostart(script, python_bin, dry_run=args.dry_run)
+                launch_app(script, python_bin, dry_run=args.dry_run)
+        elif not (sys.platform == "darwin" and entry):
+            # On macOS the LaunchAgent (RunAtLoad) already started it.
+            launch_app(script, python_bin, dry_run=args.dry_run)
 
     log("")
     log("Done. Look for the ring icon in your tray / menu bar.")

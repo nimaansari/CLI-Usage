@@ -16,7 +16,7 @@ from datetime import datetime
 import pystray
 from pystray import MenuItem as Item, Menu
 
-from cli_usage_core import (acquire_single_instance, fetch_all, open_terminal,
+from cli_usage_core import (claim_single_instance, request_quit, fetch_all, open_terminal,
                             provider_summary, worst_remaining_pct)
 from cli_usage_icon import render_icon
 
@@ -92,7 +92,11 @@ class XPlatTray:
             yield Menu.SEPARATOR
 
         yield Item("↻  Refresh now", lambda _i, _it: self.refresh_now())
-        yield Item("Quit CLI Usage", lambda _i, _it: self.icon.stop())
+        yield Item("Quit CLI Usage", lambda _i, _it: self._quit())
+
+    def _quit(self):
+        request_quit()
+        self.icon.stop()
 
     def refresh_now(self):
         threading.Thread(target=self._refresh, daemon=True).start()
@@ -133,7 +137,7 @@ class XPlatTray:
 
 
 if __name__ == "__main__":
-    if not acquire_single_instance():
+    if not claim_single_instance():
         print("cli-usage is already running.", flush=True)
         sys.exit(0)
     XPlatTray().run()

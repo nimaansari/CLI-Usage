@@ -129,6 +129,35 @@ def acquire_single_instance():
     return True
 
 
+def under_service_manager():
+    """True when systemd (Linux) started us; it restarts the tray if it stops."""
+    # Set only by our unit file; INVOCATION_ID leaks into terminals, so it can't be trusted.
+    return os.environ.get("CLI_USAGE_SERVICE") == "1" and sys.platform.startswith("linux")
+
+
+def claim_single_instance():
+    """Get the instance lock. Under systemd, wait for an older copy to exit
+    instead of exiting (which would make systemd restart us in a loop)."""
+    if acquire_single_instance():
+        return True
+    if not under_service_manager():
+        return False
+    print("another copy is running; waiting for it to exit", flush=True)
+    while not acquire_single_instance():
+        time.sleep(5)
+    return True
+
+
+def request_quit():
+    """Called from the Quit menu item. Under systemd, stop the service so it
+    is not restarted; returns after asking."""
+    if under_service_manager() and shutil.which("systemctl"):
+        try:
+            subprocess.Popen(["systemctl", "--user", "stop", "--no-block", "cli-usage.service"])
+        except OSError:
+            pass
+
+
 def running_instance_pid():
     """PID of a running tray, or None."""
     path = _lock_path()

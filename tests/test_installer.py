@@ -62,6 +62,17 @@ class InstallerTests(unittest.TestCase):
                     install.uninstall(dry_run=False)
                 self.assertFalse(entry.exists())
 
+    def test_linux_service_unit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("install.Path.home", return_value=Path(tmp)), patch("install.run"):
+                unit = install.install_linux_service(Path("/my app/cli_usage_gtk.py"), Path("/usr/bin/python3"), dry_run=False)
+                text = unit.read_text()
+                self.assertIn('ExecStart="/usr/bin/python3" "/my app/cli_usage_gtk.py"', text)
+                self.assertIn("WorkingDirectory=/my app\n", text)
+                self.assertIn("Restart=always", text)
+                self.assertIn("Environment=CLI_USAGE_SERVICE=1", text)
+                self.assertIn("WantedBy=graphical-session.target", text)
+
     def test_main_dry_run_no_launch_no_autostart(self):
         rc = install.main(["--dry-run", "--skip-deps", "--no-launch", "--no-autostart", "--frontend", "xplat"])
         self.assertEqual(rc, 0)

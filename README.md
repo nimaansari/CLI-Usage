@@ -37,7 +37,7 @@ The command:
 
 - installs anything missing: Python on Windows (via winget), the Xcode Command Line Tools on macOS, and the tray libraries on Linux
 - puts the app in `~/.local/share/cli-usage` (Windows: `%LOCALAPPDATA%\cli-usage\app`)
-- starts the app now and every time you log in
+- starts the app now and every time you log in, and restarts it within seconds if it ever crashes or gets killed
 
 **To update**, run the same command again. It replaces the running copy.
 
@@ -109,7 +109,7 @@ A CLI you don't have installed is just shown as "not installed".
 
 1. Installs PyGObject, AyatanaAppIndicator and Pillow if they're missing, using **apt** (Debian, Ubuntu, Mint), **dnf** (Fedora), **pacman** (Arch, Manjaro) or **zypper** (openSUSE).
 2. On GNOME, turns on the AppIndicator extension. That's Ubuntu's `ubuntu-appindicators@ubuntu.com` or upstream's `appindicatorsupport@rgcjonas.gmail.com`.
-3. Adds **CLI Usage** to autostart (`~/.config/autostart`) and to your app menu.
+3. Installs a systemd user service (`~/.config/systemd/user/cli-usage.service`). It starts the app with your desktop session and restarts it within 5 seconds if it crashes or is killed. **Quit** in the menu stops it until your next login, or until you open **CLI Usage** from the app menu. On desktops without a systemd user session, it uses a regular login autostart entry (`~/.config/autostart`) instead.
 4. Starts it in the background. You can close the terminal afterwards.
 
 Login sessions often can't see CLIs installed with `nvm`, npm or `~/.local/bin`, so the autostart entry saves the `PATH` of the shell you ran the setup from. If you install a new CLI later, run `./setup.sh` again.
@@ -194,6 +194,7 @@ Logs are here:
 <details>
 <summary><strong>The icon doesn't appear (Linux)</strong></summary>
 
+- Check the service: `systemctl --user status cli-usage` (logs: `journalctl --user -u cli-usage`).
 - Run `./setup.sh` again. It installs and turns on AppIndicator support.
 - On GNOME, check that the extension is on: `gnome-extensions list --enabled | grep -i appindicator`
 - After installing the extension for the first time, log out and back in.

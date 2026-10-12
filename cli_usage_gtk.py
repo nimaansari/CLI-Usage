@@ -17,7 +17,7 @@ import sys
 import threading
 from datetime import datetime
 
-from cli_usage_core import (acquire_single_instance, app_dir, fetch_all, open_terminal,
+from cli_usage_core import (claim_single_instance, request_quit, app_dir, fetch_all, open_terminal,
                             provider_summary, worst_remaining_pct)
 
 try:
@@ -99,7 +99,7 @@ class AITray:
         self._label("CLI Usage  ·  loading…", bold=True)
         self.menu.append(Gtk.SeparatorMenuItem())
         self._action("↻  Refresh now", self.do_refresh)
-        self._action("Quit CLI Usage", Gtk.main_quit)
+        self._action("Quit CLI Usage", self._quit)
         self.menu.show_all()
         self.indicator.set_menu(self.menu)
 
@@ -155,7 +155,7 @@ class AITray:
 
         self.menu.append(Gtk.SeparatorMenuItem())
         self._action("↻  Refresh now", self.do_refresh)
-        self._action("Quit CLI Usage", Gtk.main_quit)
+        self._action("Quit CLI Usage", self._quit)
         self.menu.show_all()
         return False
 
@@ -188,6 +188,10 @@ class AITray:
         item.set_submenu(sub)
         self.menu.append(item)
 
+    def _quit(self):
+        request_quit()
+        Gtk.main_quit()
+
     def _label(self, text, bold=False):
         markup = f"<b>{html.escape(text)}</b>" if bold else html.escape(text)
         item = self._markup_item(markup, text)
@@ -201,7 +205,7 @@ class AITray:
 
 
 if __name__ == "__main__":
-    if not acquire_single_instance():
+    if not claim_single_instance():
         print("cli-usage is already running.", flush=True)
         sys.exit(0)
     AITray()
