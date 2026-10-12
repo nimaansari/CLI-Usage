@@ -1,11 +1,29 @@
 <svg width="960" height="260" viewBox="0 0 960 260" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect width="960" height="260" rx="42" fill="#0B1020"/>
-  <rect x="34" y="34" width="892" height="192" rx="28" fill="#111A33" stroke="#2E3B68" stroke-width="2"/>
-  <text x="82" y="153" fill="#E8F0FF" font-family="SFMono-Regular, Consolas, 'Liberation Mono', monospace" font-size="78" font-weight="800">CLI</text>
-  <text x="252" y="153" fill="#7CFFB2" font-family="SFMono-Regular, Consolas, 'Liberation Mono', monospace" font-size="78" font-weight="800">usage</text>
-  <rect x="660" y="78" width="42" height="102" rx="10" fill="#22C55E"/>
-  <rect x="722" y="112" width="42" height="68" rx="10" fill="#FACC15"/>
-  <rect x="784" y="140" width="42" height="40" rx="10" fill="#EF4444"/>
-  <path d="M82 188H580" stroke="#334068" stroke-width="10" stroke-linecap="round"/>
-  <path d="M82 188H388" stroke="#7CFFB2" stroke-width="10" stroke-linecap="round"/>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="960" y2="260" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B1020"/>
+      <stop offset="1" stop-color="#1A1033"/>
+    </linearGradient>
+  </defs>
+  <rect width="960" height="260" rx="42" fill="url(#bg)"/>
+  <rect x="34" y="34" width="892" height="192" rx="28" fill="#111A33" fill-opacity="0.6" stroke="#2E3B68" stroke-width="2"/>
+
+  <!-- ring gauge -->
+  <g transform="translate(130 130)">
+    <circle r="68" fill="#181820"/>
+    <circle r="54" stroke="#ffffff" stroke-opacity="0.18" stroke-width="16"/>
+    <!-- 81% arc, clockwise from 12 o'clock -->
+    <path d="M0 -54 A54 54 0 1 1 -50.6 -18.9" stroke="#22C55E" stroke-width="16"/>
+    <text y="17" text-anchor="middle" fill="#ffffff" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="48" font-weight="800">81</text>
+  </g>
+
+  <text x="240" y="150" fill="#E8F0FF" font-family="SFMono-Regular, Consolas, 'Liberation Mono', monospace" font-size="78" font-weight="800">CLI</text>
+  <text x="410" y="150" fill="#7CFFB2" font-family="SFMono-Regular, Consolas, 'Liberation Mono', monospace" font-size="78" font-weight="800">usage</text>
+  <text x="244" y="190" fill="#94A3B8" font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif" font-size="22">Claude Code · Codex CLI · Gemini CLI — limits at a glance</text>
+
+  <g transform="translate(800 0)">
+    <circle cx="0" cy="88" r="12" fill="#22C55E"/>
+    <circle cx="40" cy="88" r="12" fill="#F59E0B"/>
+    <circle cx="80" cy="88" r="12" fill="#EF4444"/>
+  </g>
 </svg>

@@ -9,125 +9,28 @@ Run:
     python cli_usage_xplat.py
 """
 
-import shutil
-import subprocess
 import sys
 import threading
 from datetime import datetime
 
-from PIL import Image, ImageDraw, ImageFont
 import pystray
 from pystray import MenuItem as Item, Menu
 
-from cli_usage_core import fetch_all, worst_remaining_pct
+from cli_usage_core import (acquire_single_instance, fetch_all, open_terminal,
+                            provider_summary, worst_remaining_pct)
+from cli_usage_icon import render_icon
 
 REFRESH_SECONDS = 60
+PROVIDERS = ("Claude Code", "Codex CLI", "Gemini CLI")
 TOOL_CMDS = {"Claude Code": "claude", "Codex CLI": "codex", "Gemini CLI": "gemini"}
 
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform.startswith("win")
 
 
-# ── icon ─────────────────────────────────────────────────────────────────────
-
-def _usage_state(pct):
-    """Return visual state for remaining usage percentage."""
-    if pct is None:
-        return "unknown"
-    if pct < 10:
-        return "critical"
-    if pct < 30:
-        return "warning"
-    return "healthy"
-
-
-def _state_colors(pct):
-    state = _usage_state(pct)
-    if state == "critical":
-        return (239, 68, 68, 255), (255, 255, 255, 255)   # red
-    if state == "warning":
-        return (250, 204, 21, 255), (20, 24, 35, 255)     # yellow
-    if state == "healthy":
-        return (34, 197, 94, 255), (255, 255, 255, 255)   # green
-    return (40, 90, 200, 255), (255, 255, 255, 255)       # blue
-
 def _icon_image(pct=None):
-    """Generate a small icon. On macOS we render a template-style monochrome
-    icon (Apple's menu bar tints it automatically when set_image with a name
-    containing 'Template' is used — pystray doesn't expose that, so we just
-    use solid black which works on light menubars and is usable on dark)."""
-    size = 64
-    img  = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d    = ImageDraw.Draw(img)
-
-    bg_color, fg_color = _state_colors(pct)
-
-    # Filled rounded square as a backdrop so it's visible on any tray bg.
-    if IS_MAC:
-        # Keep macOS mostly template-like, but add tiny status bars below.
-        fg = (0, 0, 0, 255)
-        bg = (0, 0, 0, 0)
-    else:
-        fg = fg_color
-        bg = bg_color
-
-    d.rounded_rectangle((2, 2, size - 2, size - 2), radius=12, fill=bg)
-
-    # The menu bar shrinks this to ~22pt, so on macOS fill the square edge to edge.
-    font_size = 38 if IS_MAC else 28
-    font = None
-    for name in ("DejaVuSans-Bold.ttf", "arialbd.ttf",
-                 "/System/Library/Fonts/Supplemental/Arial Bold.ttf"):
-        try:
-            font = ImageFont.truetype(name, font_size)
-            break
-        except Exception:
-            pass
-    if font is None:
-        font = ImageFont.load_default()
-
-    text = "CLI"
-    bbox = d.textbbox((0, 0), text, font=font)
-    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    text_y = 4 - bbox[1] if IS_MAC else (size - h) / 2 - bbox[1] - 2
-    d.text(((size - w) / 2 - bbox[0], text_y), text, fill=fg, font=font)
-
-    if pct is not None:
-        # Tiny usage bar at the bottom: full width means 100% left.
-        bar_x0, bar_y0, bar_x1, bar_y1 = (4, 46, 60, 58) if IS_MAC else (12, 52, 52, 58)
-        d.rounded_rectangle((bar_x0, bar_y0, bar_x1, bar_y1), radius=3, fill=(255, 255, 255, 80) if not IS_MAC else (0, 0, 0, 45))
-        fill_w = int((bar_x1 - bar_x0) * max(0, min(100, pct)) / 100)
-        if fill_w > 0:
-            fill = bg_color if IS_MAC else fg_color
-            d.rounded_rectangle((bar_x0, bar_y0, bar_x0 + fill_w, bar_y1), radius=3, fill=fill)
-    return img
-
-
-# ── terminal launch (platform-specific) ─────────────────────────────────────
-
-def open_terminal(cmd):
-    if IS_MAC:
-        # Tell Terminal.app to run the command. Escape double-quotes.
-        escaped = cmd.replace('"', '\\"')
-        script  = f'tell application "Terminal" to do script "{escaped}"'
-        subprocess.Popen(["osascript", "-e", script,
-                          "-e", 'tell application "Terminal" to activate'])
-        return
-    if IS_WIN:
-        # Use Windows Terminal if available; fall back to cmd.exe.
-        if shutil.which("wt.exe"):
-            subprocess.Popen(["wt.exe", "-w", "0", "nt", "cmd", "/k", cmd])
-        else:
-            subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", cmd], shell=False)
-        return
-    # Linux fallback.
-    for term in ("gnome-terminal", "konsole", "xfce4-terminal", "xterm"):
-        if shutil.which(term):
-            if term == "gnome-terminal":
-                subprocess.Popen([term, "--", "bash", "-c", f"{cmd}; exec bash"])
-            else:
-                subprocess.Popen([term, "-e", f"bash -c '{cmd}; exec bash'"])
-            return
+    # macOS: monochrome template image, tinted by the menu bar for light/dark mode.
+    return render_icon(pct, template=IS_MAC)
 
 
 # ── tray ────────────────────────────────────────────────────────────────────
@@ -137,13 +40,18 @@ def _terminal_action(cmd):
     return lambda _icon, _item: open_terminal(cmd)
 
 
+def _disabled(text):
+    return Item(text, None, enabled=False)
+
+
 class XPlatTray:
     def __init__(self):
         self.data    = {}
+        self.updated = None
         self.icon    = pystray.Icon(
             "cli-usage",
             _icon_image(),
-            "cli-usage",
+            "CLI Usage",
             menu=Menu(self._menu_items),
         )
         self._stop   = threading.Event()
@@ -166,23 +74,25 @@ class XPlatTray:
 
     # pystray calls this lazily each time the menu opens.
     def _menu_items(self):
-        ts = datetime.now().strftime("%H:%M")
-        yield Item(f"cli-usage · {ts}", None, enabled=False)
+        if self.updated:
+            yield _disabled(f"CLI Usage  ·  updated {self.updated}")
+        else:
+            yield _disabled("CLI Usage  ·  loading…")
         yield Menu.SEPARATOR
 
-        for name in ("Claude Code", "Codex CLI", "Gemini CLI"):
+        for name in PROVIDERS:
             info = self.data.get(name, {})
-            sym  = "●" if info.get("installed") else "○"
-            yield Item(f"{sym}  {name}", None, enabled=False)
-            for text, *_ in info.get("rows", []):
-                yield Item(text, None, enabled=False)
-            if info.get("installed"):
-                cmd = TOOL_CMDS[name]
-                yield Item("    Open terminal…", _terminal_action(cmd))
+            installed = info.get("installed")
+            sym  = "●" if installed else "○"
+            yield _disabled(f"{sym}  {name}{provider_summary(info)}")
+            if installed:
+                for text, *_ in info.get("rows", []):
+                    yield _disabled(text)
+                yield Item(f"      ›  Open {TOOL_CMDS[name]} in a terminal", _terminal_action(TOOL_CMDS[name]))
             yield Menu.SEPARATOR
 
-        yield Item("Refresh", lambda _i, _it: self.refresh_now())
-        yield Item("Quit",    lambda _i, _it: self.icon.stop())
+        yield Item("↻  Refresh now", lambda _i, _it: self.refresh_now())
+        yield Item("Quit CLI Usage", lambda _i, _it: self.icon.stop())
 
     def refresh_now(self):
         threading.Thread(target=self._refresh, daemon=True).start()
@@ -191,7 +101,9 @@ class XPlatTray:
         try:
             self.data = fetch_all()
         except Exception as e:
+            print("refresh failed:", repr(e), flush=True)
             self.data = {"_error": str(e)}
+        self.updated = datetime.now().strftime("%H:%M")
         worst = worst_remaining_pct(self.data)
         # AppKit aborts (SIGTRAP) if status-item UI is touched off the main thread.
         if IS_MAC:
@@ -201,7 +113,7 @@ class XPlatTray:
             self._apply_ui(worst)
 
     def _apply_ui(self, worst):
-        self.icon.title = f"cli-usage — {worst}% left" if worst is not None else "cli-usage"
+        self.icon.title = f"CLI Usage — {worst}% left" if worst is not None else "CLI Usage"
         self.icon.icon = _icon_image(worst)
         # Force menu redraw so the lazy items reflect new data.
         try:
@@ -221,4 +133,7 @@ class XPlatTray:
 
 
 if __name__ == "__main__":
+    if not acquire_single_instance():
+        print("cli-usage is already running.", flush=True)
+        sys.exit(0)
     XPlatTray().run()
