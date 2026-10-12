@@ -37,7 +37,7 @@ def _log_path() -> Path:
 
 
 LOG_PATH = _log_path()
-TOOLS = ("claude", "codex", "gemini", "ccusage-codex")
+TOOLS = ("claude", "codex", "gemini")
 
 
 def log(msg: str) -> None:
@@ -523,6 +523,9 @@ Environment=CLI_USAGE_SERVICE=1
 WorkingDirectory={script.parent}
 Restart=always
 RestartSec=5
+# A tray should never need much; cap it so a runaway cannot slow the desktop.
+MemoryHigh=300M
+MemoryMax=600M
 
 [Install]
 WantedBy=graphical-session.target

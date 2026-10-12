@@ -95,7 +95,7 @@ If something needs your attention, the menu says so plainly:
 | CLI | What it shows |
 | --- | --- |
 | **Claude Code** | Account and plan, 5-hour limit, weekly limit, and per-model weekly limits (e.g. "Weekly Fable") when your plan has them |
-| **Codex CLI** | Account and plan, each limit window labelled by its real length (5h or weekly, depending on the plan), extra limits, credits. With [`ccusage-codex`](https://github.com/ryoppippi/ccusage) installed, it also shows tokens and cost for the month and the latest day. |
+| **Codex CLI** | Account and plan, each limit window labelled by its real length (5h or weekly, depending on the plan), extra limits, credits. Also tokens used today and this month, read from local Codex session logs. |
 | **Gemini CLI** | Account, login type, token expiry, and tokens used today, this month and all-time, read from local session logs. It shows no quota %, because Google has no public quota endpoint for personal logins. |
 
 A CLI you don't have installed is just shown as "not installed".

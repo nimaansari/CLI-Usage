@@ -80,6 +80,27 @@ class CoreFormattingTests(unittest.TestCase):
         core._USAGE_CACHE.clear()
 
 
+    def test_codex_local_tokens_counts_increases_once(self):
+        import tempfile
+        from pathlib import Path
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        def ev(inp, out):
+            return json.dumps({"timestamp": now, "type": "event_msg", "payload": {"type": "token_count",
+                               "info": {"total_token_usage": {"input_tokens": inp, "output_tokens": out, "total_tokens": 999999}}}})
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "sessions" / "2026" / "10" / "12"
+            d.mkdir(parents=True)
+            # 100 -> 100 (repeat) -> 250: 250 tokens in total
+            (d / "rollout-a.jsonl").write_text("\n".join([ev(90, 10), ev(90, 10), ev(220, 30)]) + "\n")
+            core._CODEX_FILE_CACHE.clear()
+            with patch("cli_usage_core.codex_home", return_value=Path(tmp)):
+                rows = [r[0] for r in core._codex_local_token_rows()]
+        self.assertIn("250 tok", rows[0])
+        self.assertIn("250 tok", rows[1])
+
+
 class ValidationTests(unittest.TestCase):
     def test_validate_claude_usage_accepts_expected_shape(self):
         payload = {"five_hour": {"utilization": 20}, "extra_usage": {"utilization": 0}}

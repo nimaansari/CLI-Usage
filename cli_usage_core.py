@@ -593,14 +593,12 @@ def codex_data():
         if reset_avail:
             rows.append((_kv("Reset credits", str(reset_avail)), False, None))
 
-    # Always try to add real consumption numbers from ccusage-codex if installed.
-    # Offline mode (-O) avoids the LiteLLM pricing fetch — keeps the call ~80ms.
-    rows.extend(_ccusage_codex_rows())
+    rows.extend(_codex_local_token_rows())
 
     if not has_any_limit and len([r for r in rows if "showing data from" not in r[0]]) == 1:
         # Account row only — nothing else surfaced
         plan_label = plan or "unknown"
-        rows.append((f"  no usage data available (plan: {plan_label}, ccusage-codex not installed)", False, None))
+        rows.append((f"  no usage data available (plan: {plan_label})", False, None))
 
     return {"installed": True, "rows": rows}
 
@@ -615,51 +613,92 @@ def _codex_window(window, default_kind):
     return f"{round(secs / 3600)}h", "5h"
 
 
-def _ccusage_codex_rows():
-    """Shell out to `ccusage-codex --json -O` and produce 1-2 rows of consumption data.
+_CODEX_FILE_CACHE = {}  # path -> ((mtime, size), {local date: tokens})
 
-    Returns [] silently if the tool isn't installed, never raises.
-    OpenAI's `/usage` endpoint returns null for prolite plan; this is the only
-    way to actually show numbers for that plan.
+
+def _codex_file_tokens(path):
+    """Tokens per local day for one Codex session log, streamed line by line.
+
+    Each token_count event carries a running total for the session, so the
+    usage of an event is the increase over the previous total (repeated
+    events add nothing). Results are cached until the file changes.
     """
-    rows = []
-    exe = find_cli("ccusage-codex")
-    if not exe:
-        return rows
     try:
-        # Monthly first (covers the current billing cycle), then today's slice
-        m = _run_json_cli([exe, "monthly", "--json", "-O"])
-        totals = (m or {}).get("totals") or {}
-        if totals.get("totalTokens"):
-            month_label = "This month"
-            months = (m or {}).get("monthly") or []
-            if months:
-                month_label = months[-1].get("month", month_label)
-            rows.append((_kv(month_label, f"{_fmt_n(totals['totalTokens'])} tok · ${totals.get('costUSD', 0):.2f}"), False, None))
+        st = path.stat()
+    except OSError:
+        return {}
+    key = (st.st_mtime_ns, st.st_size)
+    cached = _CODEX_FILE_CACHE.get(path)
+    if cached and cached[0] == key:
+        return cached[1]
+    per_day = {}
+    prev_total = 0
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"token_count"' not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                info = ((obj.get("payload") or {}).get("info") or {})
+                # Count input + output (cached input is part of input), the same
+                # definition ccusage and the Codex CLI use. total_tokens is larger.
+                tot = info.get("total_token_usage")
+                if isinstance(tot, dict):
+                    total = int(tot.get("input_tokens") or 0) + int(tot.get("output_tokens") or 0)
+                    used = max(0, total - prev_total)
+                    prev_total = max(prev_total, total)
+                else:
+                    last = info.get("last_token_usage") or {}
+                    used = int(last.get("input_tokens") or 0) + int(last.get("output_tokens") or 0)
+                if not used:
+                    continue
+                ts = _parse_when(obj.get("timestamp"))
+                if ts is None:
+                    continue
+                day = ts.date()
+                per_day[day] = per_day.get(day, 0) + used
+    except OSError:
+        return {}
+    _CODEX_FILE_CACHE[path] = (key, per_day)
+    return per_day
 
-        d = _run_json_cli([exe, "daily", "--json", "-O"])
-        days = (d or {}).get("daily") or []
-        if days:
-            today = days[-1]
-            rows.append((_kv("  Latest day", f"{_fmt_n(today['totalTokens'])} tok · ${today.get('costUSD', 0):.2f} · {today.get('date','')}"), False, None))
-    except Exception:
-        # Swallow — the bare-bones API rows are still shown above
-        pass
-    return rows
 
+def _codex_local_token_rows():
+    """Token totals for today and this month from local Codex session logs.
 
-def _run_json_cli(cmd, timeout=10):
-    # CREATE_NO_WINDOW: npm .cmd shims would otherwise flash a console every refresh on Windows.
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if IS_WIN else 0
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, creationflags=flags)
-    if p.returncode != 0:
-        return None
-    out = p.stdout.strip()
-    # Some CLIs prepend log lines before the JSON object — find the first '{'
-    idx = out.find("{")
-    if idx == -1:
-        return None
-    return json.loads(out[idx:])
+    Replaces shelling out to ccusage-codex, which re-parsed every log on each
+    refresh and peaked at 2+ GB of RAM. Only files touched this month are read,
+    and unchanged files come from the cache.
+    """
+    base = codex_home() / "sessions"
+    if not base.is_dir():
+        return []
+    now = datetime.now().astimezone()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
+    today, month = now.date(), (now.year, now.month)
+    today_tok = month_tok = 0
+    seen = set()
+    for path in base.glob("*/*/*/*.jsonl"):
+        try:
+            if path.stat().st_mtime < month_start:
+                continue
+        except OSError:
+            continue
+        seen.add(path)
+        for day, tok in _codex_file_tokens(path).items():
+            if (day.year, day.month) == month:
+                month_tok += tok
+                if day == today:
+                    today_tok += tok
+    for stale in set(_CODEX_FILE_CACHE) - seen:
+        del _CODEX_FILE_CACHE[stale]
+    if not month_tok:
+        return []
+    return [(_kv("Today", f"{_fmt_n(today_tok)} tok"), False, None),
+            (_kv("Month", f"{_fmt_n(month_tok)} tok"), False, None)]
 
 
 def _fmt_n(n):
