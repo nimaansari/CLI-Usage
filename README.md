@@ -19,22 +19,40 @@
 
 ## Quick start
 
+Paste one command. You don't need git or a manual download.
+
+**Linux and macOS** (in a terminal):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nimaansari/CLI-Usage/main/install.sh | bash
+```
+
+**Windows** (in PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/nimaansari/CLI-Usage/main/install.ps1 | iex
+```
+
+The command:
+
+- installs anything missing: Python on Windows (via winget), the Xcode Command Line Tools on macOS, and the tray libraries on Linux
+- puts the app in `~/.local/share/cli-usage` (Windows: `%LOCALAPPDATA%\cli-usage\app`)
+- starts the app now and every time you log in
+
+**To update**, run the same command again. It replaces the running copy.
+
+<details>
+<summary>Prefer to clone the repo yourself?</summary>
+
 ```bash
 git clone https://github.com/nimaansari/CLI-Usage.git
 cd CLI-Usage
+./setup.sh                 # Linux
+./setup_macos.sh           # macOS
+powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1   # Windows
 ```
 
-Then run the one command for your OS:
-
-| OS | Command | Notes |
-| --- | --- | --- |
-| **Linux** | `./setup.sh` | Installs the tray libraries with apt, dnf, pacman or zypper (asks for `sudo`) |
-| **macOS** | `./setup_macos.sh` | Needs Xcode Command Line Tools: `xcode-select --install` |
-| **Windows** | `powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1` | Needs Python 3.9+ (`winget install -e --id Python.Python.3.13`) |
-
-That's it. The icon appears in your tray, and the app starts by itself every time you log in.
-
-To update later, run `git pull` and the same command again. It replaces the running copy.
+</details>
 
 ## What you'll see
 
@@ -155,13 +173,13 @@ python3 cli_usage_xplat.py     # any OS, after: pip install -r requirements.txt
 
 ## Uninstall
 
-From the project folder:
-
 ```bash
-python3 install.py --uninstall     # Windows: py -3 install.py --uninstall
+curl -fsSL https://raw.githubusercontent.com/nimaansari/CLI-Usage/main/install.sh | bash -s -- --uninstall
 ```
 
-This stops the app and removes its autostart and menu entries. On macOS it also removes the LaunchAgent and `CLI Usage.app`. Delete the project folder to remove the code.
+On Windows, or from a cloned folder, run `py -3 install.py --uninstall` (Windows) or `python3 install.py --uninstall` in the app folder.
+
+This stops the app and removes its autostart and menu entries. On macOS it also removes the LaunchAgent and `CLI Usage.app`. Delete the app folder to remove the code too.
 
 ## Troubleshooting
 
@@ -254,6 +272,7 @@ cli_usage_core.py    data layer: detection, auth, usage fetch, formatting (no GU
 cli_usage_icon.py    ring-gauge tray icon (Pillow)
 cli_usage_gtk.py     Linux GTK/AppIndicator tray
 cli_usage_xplat.py   pystray tray for macOS, Windows and Linux
+install.sh / install.ps1   one-line bootstrap installers (download + run setup)
 install.py           installer used by all setup scripts
 setup.sh / setup_macos.sh / setup_windows.ps1
 tests/               unit tests
