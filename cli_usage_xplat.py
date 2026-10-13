@@ -16,7 +16,7 @@ from datetime import datetime
 import pystray
 from pystray import MenuItem as Item, Menu
 
-from cli_usage_core import (claim_single_instance, request_quit, fetch_all, open_terminal,
+from cli_usage_core import (claim_single_instance, request_quit, sd_notify, fetch_all, open_terminal,
                             provider_summary, worst_remaining_pct)
 from cli_usage_icon import render_icon
 
@@ -126,8 +126,10 @@ class XPlatTray:
             print("update_menu failed:", repr(e), flush=True)
 
     def _refresh_loop(self):
+        sd_notify("READY=1")
         while not self._stop.is_set():
             self._refresh()
+            sd_notify("WATCHDOG=1")          # a refresh that hangs stops these, and systemd restarts us
             self._stop.wait(REFRESH_SECONDS)
 
     def run(self):

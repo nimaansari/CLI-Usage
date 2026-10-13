@@ -135,6 +135,23 @@ def under_service_manager():
     return os.environ.get("CLI_USAGE_SERVICE") == "1" and sys.platform.startswith("linux")
 
 
+def sd_notify(msg):
+    """Tell systemd we are alive (READY=1 / WATCHDOG=1). No-op outside a notify service."""
+    import socket
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr or not under_service_manager():
+        return False
+    if addr.startswith("@"):
+        addr = "\0" + addr[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+            s.connect(addr)
+            s.sendall(msg.encode())
+        return True
+    except OSError:
+        return False
+
+
 def claim_single_instance():
     """Get the instance lock. Under systemd, wait for an older copy to exit
     instead of exiting (which would make systemd restart us in a loop)."""
@@ -143,7 +160,9 @@ def claim_single_instance():
     if not under_service_manager():
         return False
     print("another copy is running; waiting for it to exit", flush=True)
+    sd_notify("READY=1")
     while not acquire_single_instance():
+        sd_notify("WATCHDOG=1")
         time.sleep(5)
     return True
 

@@ -521,6 +521,11 @@ ExecStart={_systemd_quote(python_bin)} {_systemd_quote(script)}
 Environment={_systemd_quote("PATH=" + session_path_env())}
 Environment=CLI_USAGE_SERVICE=1
 WorkingDirectory={script.parent}
+# The tray pings systemd every 30-60 s; if it freezes, systemd kills and restarts it.
+Type=notify
+NotifyAccess=main
+WatchdogSec=180
+TimeoutStartSec=90
 Restart=always
 RestartSec=5
 # A tray should never need much; cap it so a runaway cannot slow the desktop.

@@ -17,7 +17,7 @@ import sys
 import threading
 from datetime import datetime
 
-from cli_usage_core import (claim_single_instance, request_quit, app_dir, fetch_all, open_terminal,
+from cli_usage_core import (claim_single_instance, request_quit, sd_notify, app_dir, fetch_all, open_terminal,
                             provider_summary, worst_remaining_pct)
 
 try:
@@ -105,6 +105,13 @@ class AITray:
 
         self.do_refresh()
         GLib.timeout_add_seconds(REFRESH_SECONDS, self._tick)
+        # systemd watchdog: pinged from the GTK main loop, so a frozen UI gets restarted
+        sd_notify("READY=1")
+        GLib.timeout_add_seconds(30, self._watchdog)
+
+    def _watchdog(self):
+        sd_notify("WATCHDOG=1")
+        return True
 
     def _set_icon(self, pct):
         desc = f"{pct}% left" if pct is not None else "CLI Usage"
