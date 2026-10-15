@@ -154,5 +154,47 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 1)
 
 
+class RateLimitBackoffTests(unittest.TestCase):
+    def setUp(self):
+        core._USAGE_CACHE.clear()
+        core._BLOCKED_UNTIL.clear()
+
+    def test_429_blocks_further_fetches_until_retry_after(self):
+        error = urllib.error.HTTPError("u", 429, "rate limited", {"Retry-After": "600"}, io.BytesIO())
+        fetch = Mock(side_effect=error)
+        with self.assertRaises(core.RateLimited):
+            core._cached_usage("p", "tok", fetch)
+        with self.assertRaises(core.RateLimited):
+            core._cached_usage("p", "tok", fetch)
+        self.assertEqual(fetch.call_count, 1)  # second call did not hit the network
+        rows = core._usage_error_rows(core.RateLimited(0), "x")
+        self.assertIn("next try at", rows[0][0])
+
+    def test_429_serves_last_good_payload(self):
+        core._cached_usage("p", "tok", lambda: {"ok": 1}, ttl=0)
+        error = urllib.error.HTTPError("u", 429, "rate limited", {"Retry-After": "600"}, io.BytesIO())
+        data, _age, stale = core._cached_usage("p", "tok", Mock(side_effect=error), ttl=0)
+        self.assertEqual(data, {"ok": 1})
+        self.assertTrue(stale)
+
+
+class ClaudeCredentialTests(unittest.TestCase):
+    def test_credentials_file_without_claude_login_is_not_used(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            creds = Path(d) / ".credentials.json"
+            creds.write_text(json.dumps({"mcpOAuth": {"x": {"accessToken": "mcp"}}}))
+            with patch.object(core, "IS_MAC", False):
+                self.assertIsNone(core._claude_oauth(creds))
+            creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "t", "subscriptionType": "max"}}))
+            self.assertEqual(core._claude_oauth(creds)["subscriptionType"], "max")
+
+    def test_env_token_is_used(self):
+        core._SHELL_TOKEN.update(at=None, value=None)
+        with patch.dict("os.environ", {"CLAUDE_CODE_OAUTH_TOKEN": "envtok"}):
+            self.assertEqual(core._claude_env_token(), "envtok")
+
+
 if __name__ == "__main__":
     unittest.main()

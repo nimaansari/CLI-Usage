@@ -338,6 +338,23 @@ def _http_json(url, headers, timeout=NET_TIMEOUT, retries=NET_RETRIES, backoff=N
 
 
 _USAGE_CACHE = {}  # provider -> (monotonic time, token, payload)
+_BLOCKED_UNTIL = {}  # provider -> (monotonic deadline, wall-clock deadline)
+
+
+class RateLimited(Exception):
+    """The provider asked us to wait; ``until`` is a wall-clock timestamp."""
+
+    def __init__(self, until):
+        super().__init__("rate limited")
+        self.until = until
+
+
+def _retry_after_seconds(exc):
+    value = exc.headers.get("Retry-After") if getattr(exc, "headers", None) else None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _cached_usage(name, token, fetch_fn, ttl=USAGE_TTL):
@@ -350,12 +367,24 @@ def _cached_usage(name, token, fetch_fn, ttl=USAGE_TTL):
     cached = _USAGE_CACHE.get(name)
     if cached and cached[1] == token and now - cached[0] < ttl:
         return cached[2], now - cached[0], False
+    blocked = _BLOCKED_UNTIL.get(name)
+    if blocked and now < blocked[0]:
+        if cached and cached[1] == token:
+            return cached[2], now - cached[0], True
+        raise RateLimited(blocked[1])
     try:
         data = fetch_fn()
-    except Exception:
+    except Exception as exc:
+        if isinstance(exc, urllib.error.HTTPError) and exc.code == 429:
+            wait = _retry_after_seconds(exc)
+            wait = 300.0 if wait is None else min(wait, 3600.0)
+            _BLOCKED_UNTIL[name] = (now + wait, time.time() + wait)
+            if not (cached and cached[1] == token):
+                raise RateLimited(_BLOCKED_UNTIL[name][1]) from exc
         if cached and cached[1] == token:
             return cached[2], now - cached[0], True
         raise
+    _BLOCKED_UNTIL.pop(name, None)
     _USAGE_CACHE[name] = (now, token, data)
     return data, 0.0, False
 
@@ -371,6 +400,9 @@ def _fmt_age(seconds):
 
 def _usage_error_rows(exc, relogin_cmd):
     """Readable menu rows for a failed usage fetch."""
+    if isinstance(exc, RateLimited):
+        at = datetime.fromtimestamp(exc.until).strftime("%H:%M")
+        return [(f"  ⏳  rate-limited by the provider — next try at {at}", False, None)]
     if isinstance(exc, urllib.error.HTTPError):
         if exc.code in (401, 403):
             return [(f"  ⚠  login expired — run `{relogin_cmd}`", False, None)]
@@ -417,6 +449,71 @@ def validate_codex_usage(data):
 
 # ── Claude Code ──────────────────────────────────────────────────────────────
 
+def _claude_oauth(creds):
+    """Return Claude Code's ``claudeAiOauth`` login dict, or None.
+
+    ``.credentials.json`` can exist without a Claude login: on macOS Claude Code
+    keeps the login in the Keychain but may still write MCP OAuth tokens to that
+    file (e.g. when run over SSH). Only trust the file if it actually holds
+    ``claudeAiOauth``; otherwise fall back to the Keychain on macOS.
+    """
+    def parse(raw):
+        try:
+            return json.loads(raw).get("claudeAiOauth") or None
+        except Exception:
+            return None
+
+    found = None
+    if creds.exists():
+        try:
+            found = parse(creds.read_text())
+        except Exception:
+            found = None
+        if found and found.get("accessToken"):
+            return found
+    if IS_MAC:
+        try:
+            p = subprocess.run(
+                ["/usr/bin/security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if p.returncode == 0:
+                found = parse(p.stdout.strip()) or found
+        except Exception:
+            pass
+    # May have plan/tier but an empty token (e.g. login via CLAUDE_CODE_OAUTH_TOKEN).
+    return found
+
+
+_SHELL_TOKEN = {"at": None, "value": None}
+
+
+def _claude_env_token():
+    """Token from CLAUDE_CODE_OAUTH_TOKEN (e.g. made with `claude setup-token`).
+
+    A menu-bar app started by launchd/systemd does not inherit the user's shell
+    environment, so if the variable isn't set here, ask the user's shell once
+    (cached for 10 minutes).
+    """
+    tok = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if tok or IS_WIN:
+        return tok
+    now = time.monotonic()
+    if _SHELL_TOKEN["at"] is not None and now - _SHELL_TOKEN["at"] < 600:
+        return _SHELL_TOKEN["value"]
+    shell = os.environ.get("SHELL") or ("/bin/zsh" if IS_MAC else "/bin/bash")
+    value = None
+    try:
+        p = subprocess.run([shell, "-lc", 'printf %s "$CLAUDE_CODE_OAUTH_TOKEN"'],
+                           capture_output=True, text=True, timeout=10,
+                           stdin=subprocess.DEVNULL)
+        value = p.stdout.strip() or None
+    except Exception:
+        pass
+    _SHELL_TOKEN.update(at=now, value=value)
+    return value
+
+
 def claude_data():
     rows = []
     cfg = claude_config_dir()
@@ -437,32 +534,12 @@ def claude_data():
             pass
 
     tok, sub_type, tier = None, "", ""
-    raw = None
-    if creds.exists():
-        try:
-            raw = creds.read_text()
-        except Exception:
-            pass
-    elif IS_MAC:
-        # On macOS Claude Code stores its OAuth credentials in the login Keychain.
-        try:
-            p = subprocess.run(
-                ["/usr/bin/security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if p.returncode == 0:
-                raw = p.stdout.strip()
-        except Exception:
-            pass
-    if raw:
-        try:
-            c = json.loads(raw)
-            o = c.get("claudeAiOauth", {})
-            tok      = o.get("accessToken")
-            sub_type = o.get("subscriptionType", "")
-            tier     = o.get("rateLimitTier", "")
-        except Exception:
-            pass
+    o = _claude_oauth(creds)
+    if o:
+        tok      = o.get("accessToken") or None
+        sub_type = o.get("subscriptionType", "")
+        tier     = o.get("rateLimitTier", "")
+    tok = tok or _claude_env_token()
 
     plan = (sub_type or billing or "").replace("_", " ").title() or "logged in"
     account_line = email + (f" ({plan})" if plan else "")
