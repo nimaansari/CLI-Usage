@@ -25,6 +25,10 @@ NET_MAX_RETRY_DELAY = 15
 # The usage endpoints are rate-limited; the tray refreshes every minute but only
 # hits the network this often per provider (see _cached_usage).
 USAGE_TTL = 180
+# Fallback for Claude when /api/oauth/usage is rate-limited: a 1-token request
+# (at most once per CLAUDE_PROBE_TTL seconds) whose response headers carry the limits.
+CLAUDE_PROBE_MODEL = "claude-haiku-4-5-20251001"
+CLAUDE_PROBE_TTL = 600
 
 IS_MAC = sys.platform == "darwin"
 IS_WIN = os.name == "nt"
@@ -514,6 +518,40 @@ def _claude_env_token():
     return value
 
 
+def _is_auth_error(exc):
+    return isinstance(exc, urllib.error.HTTPError) and exc.code in (401, 403)
+
+
+def _claude_header_usage(tok):
+    """Claude 5h/weekly usage from the anthropic-ratelimit-unified-* headers.
+
+    Used when /api/oauth/usage is rate-limited. Sends a 1-token request and
+    returns the same shape as the usage endpoint (utilization in percent).
+    """
+    body = json.dumps({"model": CLAUDE_PROBE_MODEL, "max_tokens": 1,
+                       "messages": [{"role": "user", "content": "."}]}).encode()
+    req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=body, headers={
+        "Authorization":     f"Bearer {tok}",
+        "anthropic-beta":    "oauth-2025-04-20",
+        "anthropic-version": "2023-06-01",
+        "content-type":      "application/json",
+        "User-Agent":        "claude-code/ai-tray",
+    })
+    with urllib.request.urlopen(req, timeout=NET_TIMEOUT * 2) as r:
+        headers = r.headers
+    usage = {}
+    for key, prefix in (("five_hour", "5h"), ("seven_day", "7d")):
+        util = headers.get(f"anthropic-ratelimit-unified-{prefix}-utilization")
+        reset = headers.get(f"anthropic-ratelimit-unified-{prefix}-reset")
+        if util is None:
+            continue
+        usage[key] = {"utilization": float(util) * 100,
+                      "resets_at": int(reset) if reset and reset.isdigit() else None}
+    if not usage:
+        raise ProviderResponseError("no rate-limit headers in the response")
+    return usage
+
+
 def claude_data():
     rows = []
     cfg = claude_config_dir()
@@ -562,8 +600,20 @@ def claude_data():
             },
         )))
     except Exception as e:
-        rows.extend(_usage_error_rows(e, "claude /login"))
-        return {"installed": True, "rows": rows}
+        # The usage endpoint is often rate-limited on its own; the same limits
+        # come back in the headers of a tiny API call, so try that before giving up.
+        if not _is_auth_error(e):
+            try:
+                u, age, stale = _cached_usage("claude-headers", tok,
+                                              lambda: _claude_header_usage(tok),
+                                              ttl=CLAUDE_PROBE_TTL)
+            except Exception:
+                u = None
+        else:
+            u = None
+        if u is None:
+            rows.extend(_usage_error_rows(e, "claude /login"))
+            return {"installed": True, "rows": rows}
     if stale:
         rows.append(_stale_row(age))
 

@@ -198,3 +198,27 @@ class ClaudeCredentialTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClaudeHeaderFallbackTests(unittest.TestCase):
+    @patch.object(core.urllib.request, "urlopen")
+    def test_header_usage_parses_unified_headers(self, urlopen):
+        resp = Mock()
+        resp.headers = {
+            "anthropic-ratelimit-unified-5h-utilization": "0.03",
+            "anthropic-ratelimit-unified-5h-reset": "1792098000",
+            "anthropic-ratelimit-unified-7d-utilization": "0.5",
+            "anthropic-ratelimit-unified-7d-reset": "1792677600",
+        }
+        urlopen.return_value.__enter__ = Mock(return_value=resp)
+        urlopen.return_value.__exit__ = Mock(return_value=False)
+        u = core._claude_header_usage("tok")
+        self.assertAlmostEqual(u["five_hour"]["utilization"], 3.0)
+        self.assertEqual(u["seven_day"]["resets_at"], 1792677600)
+        self.assertIn("50% left", core._limit_row("Weekly limit", u["seven_day"]["utilization"],
+                                                 u["seven_day"]["resets_at"], "week"))
+
+    def test_auth_errors_skip_the_fallback(self):
+        e401 = urllib.error.HTTPError("u", 401, "unauth", {}, io.BytesIO())
+        self.assertTrue(core._is_auth_error(e401))
+        self.assertFalse(core._is_auth_error(core.RateLimited(0)))
