@@ -98,7 +98,7 @@ class AITray:
         self.menu = Gtk.Menu()
         self._label("CLI Usage  ·  loading…", bold=True)
         self.menu.append(Gtk.SeparatorMenuItem())
-        self._action("↻  Refresh now", self.do_refresh)
+        self._action("↻  Refresh now", self._refresh_clicked)
         self._action("Quit CLI Usage", self._quit)
         self.menu.show_all()
         self.indicator.set_menu(self.menu)
@@ -134,12 +134,15 @@ class AITray:
         self.do_refresh()
         return True
 
-    def do_refresh(self):
-        threading.Thread(target=self._bg_fetch, daemon=True).start()
+    def do_refresh(self, force=False):
+        threading.Thread(target=self._bg_fetch, args=(force,), daemon=True).start()
 
-    def _bg_fetch(self):
+    def _refresh_clicked(self):
+        self.do_refresh(force=True)
+
+    def _bg_fetch(self, force=False):
         try:
-            data = fetch_all()
+            data = fetch_all(force=force)
         except Exception as e:
             print("refresh failed:", repr(e), flush=True)
             data = {"_error": str(e)}
@@ -161,7 +164,7 @@ class AITray:
             self._submenu(name, data.get(name, {}))
 
         self.menu.append(Gtk.SeparatorMenuItem())
-        self._action("↻  Refresh now", self.do_refresh)
+        self._action("↻  Refresh now", self._refresh_clicked)
         self._action("Quit CLI Usage", self._quit)
         self.menu.show_all()
         return False

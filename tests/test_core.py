@@ -1,5 +1,6 @@
 import io
 import json
+import time
 import urllib.error
 import unittest
 from unittest.mock import Mock, patch
@@ -49,7 +50,7 @@ class CoreFormattingTests(unittest.TestCase):
         self.assertEqual(core._reset_str((now + timedelta(hours=2, minutes=5)).isoformat(), "5h", now), "resets in 2h 05m")
         self.assertEqual(core._reset_str((now + timedelta(minutes=20)).isoformat(), "5h", now), "resets in 20m")
         self.assertTrue(core._reset_str((now + timedelta(days=3)).isoformat(), "week", now).startswith("resets "))
-        self.assertEqual(core._reset_str((now - timedelta(minutes=1)).isoformat(), "5h", now), "resetting now")
+        self.assertTrue(core._reset_str((now - timedelta(minutes=1)).isoformat(), "5h", now).startswith("reset at "))
         self.assertEqual(core._reset_str(None, "5h", now), "")
 
     def test_provider_summary(self):
@@ -99,6 +100,47 @@ class CoreFormattingTests(unittest.TestCase):
                 rows = [r[0] for r in core._codex_local_token_rows()]
         self.assertIn("250 tok", rows[0])
         self.assertIn("250 tok", rows[1])
+
+
+    def test_passed_reset_shows_window_as_fresh(self):
+        from datetime import datetime, timedelta
+        past = (datetime.now().astimezone() - timedelta(minutes=5)).isoformat()
+        row = core._limit_row("5h limit", 92, past, "5h")
+        self.assertIn("100% left", row)
+        self.assertIn("reset at", row)
+        future = (datetime.now().astimezone() + timedelta(hours=2)).isoformat()
+        self.assertIn("8% left", core._limit_row("5h limit", 92, future, "5h"))
+
+    def test_cache_expires_when_a_reset_passes(self):
+        from datetime import datetime, timedelta
+        core._USAGE_CACHE.clear(); core._BLOCKED_UNTIL.clear()
+        calls = []
+        soon = (datetime.now().astimezone() + timedelta(seconds=1)).isoformat()
+        fetch = lambda: calls.append(1) or {"five_hour": {"utilization": 50, "resets_at": soon}}
+        core._cached_usage("t", "tok", fetch)
+        core._cached_usage("t", "tok", fetch)
+        self.assertEqual(len(calls), 1)                 # within TTL, before the reset
+        with patch("cli_usage_core.time.time", return_value=time.time() + 5):
+            core._cached_usage("t", "tok", fetch)
+        self.assertEqual(len(calls), 2)                 # reset passed: fetched again
+        core._USAGE_CACHE.clear()
+
+    def test_force_refresh_skips_ttl_but_not_retry_after(self):
+        core._USAGE_CACHE.clear(); core._BLOCKED_UNTIL.clear()
+        calls = []
+        fetch = lambda: calls.append(1) or {"ok": 1}
+        core._cached_usage("t", "tok", fetch)
+        core._FORCE = True
+        try:
+            core._cached_usage("t", "tok", fetch)
+            self.assertEqual(len(calls), 2)
+            core._BLOCKED_UNTIL["t"] = (time.monotonic() + 600, time.time() + 600)
+            data, _, stale = core._cached_usage("t", "tok", fetch)
+            self.assertEqual(len(calls), 2)             # still blocked by Retry-After
+            self.assertTrue(stale)
+        finally:
+            core._FORCE = False
+            core._USAGE_CACHE.clear(); core._BLOCKED_UNTIL.clear()
 
 
 class ValidationTests(unittest.TestCase):
@@ -196,9 +238,6 @@ class ClaudeCredentialTests(unittest.TestCase):
             self.assertEqual(core._claude_env_token(), "envtok")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ClaudeHeaderFallbackTests(unittest.TestCase):
     @patch.object(core.urllib.request, "urlopen")
@@ -215,10 +254,15 @@ class ClaudeHeaderFallbackTests(unittest.TestCase):
         u = core._claude_header_usage("tok")
         self.assertAlmostEqual(u["five_hour"]["utilization"], 3.0)
         self.assertEqual(u["seven_day"]["resets_at"], 1792677600)
+        future = int(time.time()) + 3 * 86400            # a fixed date would have passed by now
         self.assertIn("50% left", core._limit_row("Weekly limit", u["seven_day"]["utilization"],
-                                                 u["seven_day"]["resets_at"], "week"))
+                                                 future, "week"))
 
     def test_auth_errors_skip_the_fallback(self):
         e401 = urllib.error.HTTPError("u", 401, "unauth", {}, io.BytesIO())
         self.assertTrue(core._is_auth_error(e401))
         self.assertFalse(core._is_auth_error(core.RateLimited(0)))
+
+
+if __name__ == "__main__":
+    unittest.main()

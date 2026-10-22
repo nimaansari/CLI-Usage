@@ -99,11 +99,11 @@ class XPlatTray:
         self.icon.stop()
 
     def refresh_now(self):
-        threading.Thread(target=self._refresh, daemon=True).start()
+        threading.Thread(target=self._refresh, args=(True,), daemon=True).start()
 
-    def _refresh(self):
+    def _refresh(self, force=False):
         try:
-            self.data = fetch_all()
+            self.data = fetch_all(force=force)
         except Exception as e:
             print("refresh failed:", repr(e), flush=True)
             self.data = {"_error": str(e)}

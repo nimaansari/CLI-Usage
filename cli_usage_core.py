@@ -260,7 +260,7 @@ def _reset_str(when, kind, now=None):
     now = now or datetime.now().astimezone()
     secs = (dt - now).total_seconds()
     if secs <= 0:
-        return "resetting now"
+        return f"reset at {dt.strftime('%H:%M')}, updating"
     if secs < 24 * 3600:
         h, m = int(secs // 3600), int(secs % 3600 // 60)
         if h == 0:
@@ -273,8 +273,17 @@ def _kv(key, val, key_w=10):
     return f"  {key:<{key_w}} {val}"
 
 
+def _reset_passed(reset_when, now=None):
+    dt = _parse_when(reset_when)
+    return bool(dt and dt <= (now or datetime.now().astimezone()))
+
+
 def _limit_row(label, used_pct, reset_when, kind, label_w=13):
     remaining = None if used_pct is None else 100 - float(used_pct)
+    if remaining is not None and _reset_passed(reset_when):
+        # Shown from an older payload (cached or rate-limited): the window has reset since,
+        # so the old usage no longer applies. Show it as fresh until new numbers arrive.
+        remaining = 100.0
     bar = _bar(remaining)
     rs  = _reset_str(reset_when, kind)
     tail = f"  ·  {rs}" if rs else ""
@@ -361,6 +370,29 @@ def _retry_after_seconds(exc):
         return None
 
 
+_FORCE = False   # set by fetch_all(force=True): skip the TTL (never the provider's Retry-After)
+
+
+def _earliest_reset(payload):
+    """Wall-clock timestamp of the soonest reset in a usage payload (Claude or Codex), or None."""
+    found = []
+
+    def walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k in ("resets_at", "reset_at") and v not in (None, ""):
+                    dt = _parse_when(v)
+                    if dt:
+                        found.append(dt.timestamp())
+                else:
+                    walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    walk(payload)
+    return min(found) if found else None
+
+
 def _cached_usage(name, token, fetch_fn, ttl=USAGE_TTL):
     """Fetch through a small TTL cache; on failure serve the last good payload.
 
@@ -369,7 +401,11 @@ def _cached_usage(name, token, fetch_fn, ttl=USAGE_TTL):
     """
     now = time.monotonic()
     cached = _USAGE_CACHE.get(name)
-    if cached and cached[1] == token and now - cached[0] < ttl:
+    fresh = cached and cached[1] == token and now - cached[0] < ttl and not _FORCE
+    if fresh:
+        nxt = _earliest_reset(cached[2])
+        fresh = nxt is None or time.time() < nxt          # a limit reset since: fetch again
+    if fresh:
         return cached[2], now - cached[0], False
     blocked = _BLOCKED_UNTIL.get(name)
     if blocked and now < blocked[0]:
@@ -1049,12 +1085,28 @@ def open_terminal(cmd):
     return True
 
 
-def fetch_all():
-    return {
-        "Claude Code": claude_data(),
-        "Codex CLI":   codex_data(),
-        "Gemini CLI":  gemini_data(),
-    }
+import threading as _threading
+_FETCH_LOCK = _threading.Lock()   # the timer and a Refresh click must not interleave
+
+
+def fetch_all(force=False):
+    """force=True (the Refresh item) skips the cache TTL; a provider's Retry-After still applies."""
+    global _FORCE
+    with _FETCH_LOCK:
+        _FORCE = force
+        try:
+            return _fetch_all()
+        finally:
+            _FORCE = False
+
+
+def _fetch_all():
+    if True:
+        return {
+            "Claude Code": claude_data(),
+            "Codex CLI":   codex_data(),
+            "Gemini CLI":  gemini_data(),
+        }
 
 
 def _row_pct(text):
