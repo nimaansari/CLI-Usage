@@ -588,6 +588,32 @@ def _claude_header_usage(tok):
     return usage
 
 
+def _claude_usage_for(tok):
+    """(usage, age, stale) for one token: the usage endpoint, else the rate-limit headers of a
+    1-token call (the usage endpoint is often rate-limited on its own). Raises if both fail."""
+    key = tok[-10:]                           # cache and back-off per token, not per provider
+    try:
+        return _cached_usage(f"claude:{key}", tok, lambda: validate_claude_usage(_http_json(
+            "https://api.anthropic.com/api/oauth/usage",
+            {
+                "Authorization":     f"Bearer {tok}",
+                "anthropic-beta":    "oauth-2025-04-20",
+                "anthropic-version": "2023-06-01",
+                "User-Agent":        "claude-code/ai-tray",
+            },
+        )))
+    except Exception as e:
+        _note_error("claude usage", e)
+        if _is_auth_error(e):
+            raise
+        try:
+            return _cached_usage(f"claude-headers:{key}", tok, lambda: _claude_header_usage(tok),
+                                 ttl=CLAUDE_PROBE_TTL)
+        except Exception as e2:
+            _note_error("claude headers", e2)
+            raise e2 if _is_auth_error(e2) else e
+
+
 def claude_data():
     rows = []
     cfg = claude_config_dir()
@@ -613,9 +639,18 @@ def claude_data():
         tok      = o.get("accessToken") or None
         sub_type = o.get("subscriptionType", "")
         tier     = o.get("rateLimitTier", "")
-    _LAST_ERRORS["claude token source"] = ("stored login" if tok else
-                                           "CLAUDE_CODE_OAUTH_TOKEN" if _claude_env_token() else "none")
-    tok = tok or _claude_env_token()
+    # Tokens to try, best first. A stored login's access token expires after a few hours and
+    # only Claude Code refreshes it, so on a machine where Claude Code runs on a long-lived
+    # CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`) the Keychain token goes stale for good.
+    env_tok = _claude_env_token()
+    expired = bool(o and o.get("expiresAt") and float(o["expiresAt"]) / 1000 < time.time())
+    candidates = []
+    if tok and not expired:
+        candidates.append(("stored login", tok))
+    if env_tok and env_tok != tok:
+        candidates.append(("CLAUDE_CODE_OAUTH_TOKEN", env_tok))
+    if tok and expired:
+        candidates.append(("stored login (expired)", tok))
 
     plan = (sub_type or billing or "").replace("_", " ").title() or "logged in"
     account_line = email + (f" ({plan})" if plan else "")
@@ -623,37 +658,24 @@ def claude_data():
     if tier:
         rows.append((_kv("Tier", tier.replace("_", " ")), False, None))
 
-    if not tok:
+    if not candidates:
         rows.append(("  not logged in — run `claude` and /login", False, None))
         return {"installed": True, "rows": rows}
 
-    try:
-        u, age, stale = _cached_usage("claude", tok, lambda: validate_claude_usage(_http_json(
-            "https://api.anthropic.com/api/oauth/usage",
-            {
-                "Authorization":     f"Bearer {tok}",
-                "anthropic-beta":    "oauth-2025-04-20",
-                "anthropic-version": "2023-06-01",
-                "User-Agent":        "claude-code/ai-tray",
-            },
-        )))
-    except Exception as e:
-        _note_error("claude usage", e)
-        # The usage endpoint is often rate-limited on its own; the same limits
-        # come back in the headers of a tiny API call, so try that before giving up.
-        if not _is_auth_error(e):
-            try:
-                u, age, stale = _cached_usage("claude-headers", tok,
-                                              lambda: _claude_header_usage(tok),
-                                              ttl=CLAUDE_PROBE_TTL)
-            except Exception as e2:
-                _note_error("claude headers", e2)
-                u = None
-        else:
+    u = first_err = None
+    for source, tok in candidates:
+        _LAST_ERRORS["claude token source"] = source
+        try:
+            u, age, stale = _claude_usage_for(tok)
+            break
+        except Exception as e:
+            first_err = first_err or e
             u = None
-        if u is None:
-            rows.extend(_usage_error_rows(e, "claude /login"))
-            return {"installed": True, "rows": rows}
+            if not _is_auth_error(e) and not isinstance(e, RateLimited):
+                break                         # offline etc.: another token will not help
+    if u is None:
+        rows.extend(_usage_error_rows(first_err, "claude /login"))
+        return {"installed": True, "rows": rows}
     if stale:
         rows.append(_stale_row(age))
 

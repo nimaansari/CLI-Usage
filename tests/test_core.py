@@ -264,5 +264,51 @@ class ClaudeHeaderFallbackTests(unittest.TestCase):
         self.assertFalse(core._is_auth_error(core.RateLimited(0)))
 
 
+class ClaudeTokenFallbackTests(unittest.TestCase):
+    def setUp(self):
+        core._USAGE_CACHE.clear(); core._BLOCKED_UNTIL.clear()
+
+    def _run(self, oauth, env_tok, usage_by_tok, headers_by_tok):
+        def http_json(url, headers, **kw):
+            r = usage_by_tok[headers["Authorization"].split()[1]]
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        def header_usage(tok):
+            r = headers_by_tok[tok]
+            if isinstance(r, Exception):
+                raise r
+            return r
+        with patch.object(core, "find_cli", return_value="/bin/claude"), \
+             patch.object(core, "_claude_oauth", return_value=oauth), \
+             patch.object(core, "_claude_env_token", return_value=env_tok), \
+             patch.object(core, "_http_json", side_effect=http_json), \
+             patch.object(core, "_claude_header_usage", side_effect=header_usage):
+            return [r[0] for r in core.claude_data()["rows"]]
+
+    def test_expired_stored_login_falls_back_to_env_token(self):
+        e429 = urllib.error.HTTPError("u", 429, "rl", {"Retry-After": "1800"}, io.BytesIO())
+        e401 = urllib.error.HTTPError("u", 401, "no", {}, io.BytesIO())
+        rows = self._run({"accessToken": "old", "expiresAt": (time.time() - 3600) * 1000,
+                          "subscriptionType": "max"},
+                         "envtok",
+                         {"old": e429, "envtok": e429},
+                         {"old": e401, "envtok": {"five_hour": {"utilization": 5.0, "resets_at": None}}})
+        self.assertTrue(any("95% left" in r for r in rows), rows)
+        self.assertEqual(core._LAST_ERRORS["claude token source"], "CLAUDE_CODE_OAUTH_TOKEN")
+
+    def test_valid_stored_login_is_used_first(self):
+        rows = self._run({"accessToken": "good", "expiresAt": (time.time() + 3600) * 1000},
+                         "envtok", {"good": {"five_hour": {"utilization": 20}}}, {})
+        self.assertTrue(any("80% left" in r for r in rows), rows)
+
+    def test_rejected_stored_login_tries_env_token(self):
+        e401 = urllib.error.HTTPError("u", 401, "no", {}, io.BytesIO())
+        rows = self._run({"accessToken": "bad"}, "envtok",
+                         {"bad": e401, "envtok": {"five_hour": {"utilization": 30}}}, {})
+        self.assertTrue(any("70% left" in r for r in rows), rows)
+
+
 if __name__ == "__main__":
     unittest.main()
