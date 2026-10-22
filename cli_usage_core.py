@@ -613,6 +613,8 @@ def claude_data():
         tok      = o.get("accessToken") or None
         sub_type = o.get("subscriptionType", "")
         tier     = o.get("rateLimitTier", "")
+    _LAST_ERRORS["claude token source"] = ("stored login" if tok else
+                                           "CLAUDE_CODE_OAUTH_TOKEN" if _claude_env_token() else "none")
     tok = tok or _claude_env_token()
 
     plan = (sub_type or billing or "").replace("_", " ").title() or "logged in"
@@ -636,6 +638,7 @@ def claude_data():
             },
         )))
     except Exception as e:
+        _note_error("claude usage", e)
         # The usage endpoint is often rate-limited on its own; the same limits
         # come back in the headers of a tiny API call, so try that before giving up.
         if not _is_auth_error(e):
@@ -643,7 +646,8 @@ def claude_data():
                 u, age, stale = _cached_usage("claude-headers", tok,
                                               lambda: _claude_header_usage(tok),
                                               ttl=CLAUDE_PROBE_TTL)
-            except Exception:
+            except Exception as e2:
+                _note_error("claude headers", e2)
                 u = None
         else:
             u = None
@@ -1100,7 +1104,34 @@ def fetch_all(force=False):
             _FORCE = False
 
 
+def _write_status(data):
+    """Last refresh as shown in the menu (no tokens), for troubleshooting: app_dir()/last-refresh.json."""
+    try:
+        out = {"time": datetime.now().astimezone().isoformat(timespec="seconds"),
+               "errors": _LAST_ERRORS,
+               "providers": {k: [r[0] for r in v.get("rows", [])] for k, v in data.items() if isinstance(v, dict)}}
+        (app_dir() / "last-refresh.json").write_text(json.dumps(out, indent=1, ensure_ascii=False))
+    except Exception:   # never let diagnostics break a refresh
+        pass
+
+
+_LAST_ERRORS = {}
+
+
+def _note_error(provider, exc):
+    """Remember why a provider failed (type and HTTP code, never the token) for last-refresh.json."""
+    code = getattr(exc, "code", None)
+    _LAST_ERRORS[provider] = f"{type(exc).__name__}{f' HTTP {code}' if code else ''}: {str(exc)[:200]}"
+
+
 def _fetch_all():
+    _LAST_ERRORS.clear()
+    data = _fetch_all_inner()
+    _write_status(data)
+    return data
+
+
+def _fetch_all_inner():
     if True:
         return {
             "Claude Code": claude_data(),
