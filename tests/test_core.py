@@ -284,7 +284,8 @@ class ClaudeTokenFallbackTests(unittest.TestCase):
              patch.object(core, "_claude_oauth", return_value=oauth), \
              patch.object(core, "_claude_env_token", return_value=env_tok), \
              patch.object(core, "_http_json", side_effect=http_json), \
-             patch.object(core, "_claude_header_usage", side_effect=header_usage):
+             patch.object(core, "_claude_header_usage", side_effect=header_usage), \
+             patch.object(core, "_refresh_claude_login", return_value=False):
             return [r[0] for r in core.claude_data()["rows"]]
 
     def test_expired_stored_login_falls_back_to_env_token(self):
@@ -308,6 +309,43 @@ class ClaudeTokenFallbackTests(unittest.TestCase):
         rows = self._run({"accessToken": "bad"}, "envtok",
                          {"bad": e401, "envtok": {"five_hour": {"utilization": 30}}}, {})
         self.assertTrue(any("70% left" in r for r in rows), rows)
+
+
+class ClaudeLoginRenewTests(unittest.TestCase):
+    def setUp(self):
+        core._USAGE_CACHE.clear(); core._BLOCKED_UNTIL.clear()
+        core._LOGIN_REFRESH["at"] = 0.0
+
+    def test_expired_login_is_renewed_before_fetching(self):
+        logins = [{"accessToken": "old", "expiresAt": (time.time() - 60) * 1000},
+                  {"accessToken": "new", "expiresAt": (time.time() + 8 * 3600) * 1000}]
+        used = []
+
+        def http_json(url, headers, **kw):
+            used.append(headers["Authorization"].split()[1])
+            return {"seven_day": {"utilization": 2}}
+        with patch.object(core, "find_cli", return_value="/bin/claude"), \
+             patch.object(core, "_claude_oauth", side_effect=lambda c: logins[min(len(used) + run.call_count, 1)]), \
+             patch.object(core, "_claude_env_token", return_value=None), \
+             patch.object(core, "_http_json", side_effect=http_json), \
+             patch.object(core.subprocess, "run") as run:
+            rows = [r[0] for r in core.claude_data()["rows"]]
+        run.assert_called_once()
+        self.assertEqual(run.call_args[0][0][1:], ["auth", "status", "--json"])
+        self.assertEqual(used, ["new"])
+        self.assertTrue(any("98% left" in r for r in rows), rows)
+
+    def test_renew_is_rate_limited(self):
+        with patch.object(core, "find_cli", return_value="/bin/claude"), \
+             patch.object(core.subprocess, "run") as run:
+            self.assertTrue(core._refresh_claude_login("x"))
+            self.assertFalse(core._refresh_claude_login("x"))
+        self.assertEqual(run.call_count, 1)
+
+    def test_login_stale(self):
+        self.assertTrue(core._login_stale({"accessToken": "a", "expiresAt": (time.time() + 60) * 1000}))
+        self.assertFalse(core._login_stale({"accessToken": "a", "expiresAt": (time.time() + 3600) * 1000}))
+        self.assertTrue(core._login_stale({}))
 
 
 if __name__ == "__main__":

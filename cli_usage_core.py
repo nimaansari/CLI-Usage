@@ -525,6 +525,41 @@ def _claude_oauth(creds):
     return found
 
 
+_LOGIN_REFRESH = {"at": 0.0}
+LOGIN_REFRESH_EVERY = 300        # seconds between attempts while the login stays stale
+
+
+def _refresh_claude_login(reason):
+    """Let Claude Code renew its own login: `claude auth status` refreshes an expired OAuth
+    access token with the stored refresh token and writes it back (file or Keychain). It makes
+    no model call, so it costs no quota. Needed because Claude Code only renews the token when
+    it runs; after a limit runs out nobody runs it, and the tray was left with a dead token.
+    Returns True if it ran."""
+    now = time.time()
+    if now - _LOGIN_REFRESH["at"] < LOGIN_REFRESH_EVERY:
+        return False
+    _LOGIN_REFRESH["at"] = now
+    exe = find_cli("claude")
+    if not exe:
+        return False
+    try:
+        subprocess.run([exe, "auth", "status", "--json"], capture_output=True, text=True, timeout=45,
+                       stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if IS_WIN else 0)
+        _LAST_ERRORS["claude login refresh"] = f"ran `claude auth status` ({reason})"
+        return True
+    except (OSError, subprocess.SubprocessError) as e:
+        _LAST_ERRORS["claude login refresh"] = f"failed: {type(e).__name__}"
+        return False
+
+
+def _login_stale(o, margin=300):
+    """True if the stored login is missing its token or expires within `margin` seconds."""
+    if not o or not o.get("accessToken"):
+        return True
+    exp = o.get("expiresAt")
+    return bool(exp) and float(exp) / 1000 < time.time() + margin
+
+
 _SHELL_TOKEN = {"at": None, "value": None}
 
 
@@ -635,6 +670,8 @@ def claude_data():
 
     tok, sub_type, tier = None, "", ""
     o = _claude_oauth(creds)
+    if o is not None and _login_stale(o) and _refresh_claude_login("login expired"):
+        o = _claude_oauth(creds)
     if o:
         tok      = o.get("accessToken") or None
         sub_type = o.get("subscriptionType", "")
@@ -673,6 +710,14 @@ def claude_data():
             u = None
             if not _is_auth_error(e) and not isinstance(e, RateLimited):
                 break                         # offline etc.: another token will not help
+    if u is None and _is_auth_error(first_err) and _refresh_claude_login("login rejected"):
+        o2 = _claude_oauth(creds)                 # renewed token: try once more
+        if o2 and o2.get("accessToken"):
+            try:
+                u, age, stale = _claude_usage_for(o2["accessToken"])
+                _LAST_ERRORS["claude token source"] = "stored login (renewed)"
+            except Exception as e:
+                first_err = e
     if u is None:
         rows.extend(_usage_error_rows(first_err, "claude /login"))
         return {"installed": True, "rows": rows}
